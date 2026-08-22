@@ -2,19 +2,20 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-const supabase = createClient(supabaseUrl, supabaseKey);
-
 export async function POST(request: Request) {
   try {
+    // BAĞLANTIYI FONKSİYONUN İÇİNE ALDIK! (Vercel Build'i artık burada çökmeyecek)
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
     const { faturaUrunAdi, teklifUrunAdi } = await request.json();
 
     if (!faturaUrunAdi || !teklifUrunAdi) {
       return NextResponse.json({ error: 'Eksik veri' }, { status: 400 });
     }
 
-    // Upsert: Eğer bu ürün daha önce kaydedilmişse yeni seçimi üstüne yazar (günceller), yoksa sıfırdan ekler.
+    // Upsert: Eğer bu ürün daha önce kaydedilmişse yeni seçimi üstüne yazar, yoksa ekler.
     const { error } = await supabase
       .from('eslesme_hafizasi')
       .upsert(
