@@ -1,9 +1,6 @@
 import { NextResponse } from 'next/server';
 import PDFParser from 'pdf2json';
 
-// ============================================================================
-// TYPESCRIPT ZIRHI
-// ============================================================================
 interface PDFTextRun {
   T: string;
 }
@@ -18,18 +15,15 @@ interface PDFPage {
   Texts: PDFText[];
 }
 
-// Akıllı Radar: Kütüphane Pages dizisini nereye saklarsa saklasın, bulup çıkarır.
 function findPagesInPDFData(obj: unknown): PDFPage[] | null {
   if (!obj || typeof obj !== 'object') return null;
 
   const record = obj as Record<string, unknown>;
 
-  // Eğer bulunduğumuz dizinde Pages varsa onu döndür
   if (Array.isArray(record.Pages)) {
     return record.Pages as unknown as PDFPage[];
   }
 
-  // Yoksa, objenin içindeki tüm alt klasörlere (özelliklere) girip aramaya devam et
   for (const key in record) {
     if (Object.prototype.hasOwnProperty.call(record, key)) {
       const result = findPagesInPDFData(record[key]);
@@ -51,9 +45,6 @@ export async function POST(request: Request) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    // ============================================================================
-    // 1. AŞAMA: JSON KOORDİNAT MODU
-    // ============================================================================
     const pdfData = await new Promise<unknown>((resolve, reject) => {
       const pdfParser = new PDFParser();
 
@@ -69,15 +60,9 @@ export async function POST(request: Request) {
       pdfParser.parseBuffer(buffer);
     });
 
-    // ============================================================================
-    // 2. AŞAMA: İNSAN GÖZÜ GİBİ OKUMA (Görsel İnşa Algoritması)
-    // ============================================================================
-
-    // Tahmin yürütmek yok. Radar ile Pages dizisini buluyoruz.
     const pdfPages = findPagesInPDFData(pdfData);
 
     if (!pdfPages || pdfPages.length === 0) {
-      // Eğer radar da bulamazsa, kütüphanenin ne saçmaladığını tam olarak görelim
       const availableKeys = pdfData && typeof pdfData === 'object' ? Object.keys(pdfData).join(', ') : 'Boş Obje';
       throw new Error(`PDF sayfaları bulunamadı! Kütüphanenin verdiği veri yapısı: [${availableKeys}]`);
     }
@@ -94,14 +79,11 @@ export async function POST(request: Request) {
 
         let text = "";
         try {
-          // Önce normal çevirmeyi dene
           text = decodeURIComponent(t.R[0].T);
         } catch (_e) {
-          // Eğer % işareti yüzünden URI Malformed hatası verirse, % işaretini izole edip tekrar dene
           try {
             text = decodeURIComponent(t.R[0].T.replace(/%(?![0-9a-fA-F]{2})/g, "%25"));
           } catch (_e2) {
-            // Yine de çökerse, ham halini bırak ama sistemi durdurma
             text = t.R[0].T;
           }
         }
@@ -126,9 +108,6 @@ export async function POST(request: Request) {
       });
     });
 
-    // ============================================================================
-    // 3. AŞAMA: ÜRÜN BLOKLARINI AYIRMA
-    // ============================================================================
     const rawLines = visualText.split('\n');
     const rawItems = [];
     let currentItem = null;
@@ -137,12 +116,14 @@ export async function POST(request: Request) {
       const trimLine = line.trim();
       if (!trimLine) continue;
 
-      if (trimLine.includes("Hesap Kodu") || trimLine.includes("Oluşturan")) {
+      // Hata çıkaran break kaldırıldı, başlıkları atlayıp dosyayı okumaya devam eder.
+      if (trimLine.includes("Hesap Kodu") || trimLine.includes("Oluşturan") || trimLine.includes("Sayfa")) {
         if (currentItem) rawItems.push(currentItem);
-        break;
+        currentItem = null;
+        continue;
       }
 
-      // Stok kodu harf veya rakamla başlayabilir, içinde nokta veya tire olabilir, en az 3 karakter olmalıdır.
+      // Stok kodu esnekleştirildi (Harf, rakam, nokta ve tire destekler)
       const stockMatch = trimLine.match(/^([A-Z0-9\.\-]{3,})\s+(.*)/i);
 
       if (stockMatch) {
@@ -157,9 +138,6 @@ export async function POST(request: Request) {
     }
     if (currentItem) rawItems.push(currentItem);
 
-    // ============================================================================
-    // 4. AŞAMA: MATEMATİKSEL FİYAT ÇÖZÜCÜ VE ZAM KONTROLÜ
-    // ============================================================================
     const results = [];
     const parseNumber = (str: string) => parseFloat(str.replace(/\./g, '').replace(',', '.'));
 
@@ -242,6 +220,14 @@ export async function POST(request: Request) {
         farkYuzde,
         durum
       });
+    }
+
+    // Eğer PDF okunmasına rağmen liste boş çıkarsa, sebebi net görebilmek için ham metni yansıtır.
+    if (results.length === 0) {
+      const preview = rawLines.slice(0, 20).join(" | ");
+      return NextResponse.json({
+        error: "Eşleşme yok. PDF formatı farklı algılandı. Ham metin örneği: " + preview
+      }, { status: 400 });
     }
 
     return NextResponse.json({ success: true, data: results });
