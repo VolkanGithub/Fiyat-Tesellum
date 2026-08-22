@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { degerlendir, manuelSecimUygula } from '@/lib/matchEngine'; // HATA 1 ÇÖZÜLDÜ: Eklendi
