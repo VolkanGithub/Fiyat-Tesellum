@@ -1,0 +1,3962 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+public/
+  file.svg
+  globe.svg
+  next.svg
+  vercel.svg
+  window.svg
+src/
+  app/
+    api/
+      read-pdf/
+        route.ts
+    denetim/
+      page.tsx
+    faturalar/
+      page.tsx
+    fiyat-listeleri/
+      page.tsx
+    import/
+      page.tsx
+    tedarikciler/
+      page.tsx
+    tesellum/
+      page.tsx
+    favicon.ico
+    globals.css
+    layout.tsx
+    page.tsx
+  lib/
+    exportRapor.ts
+    matchEngine.ts
+    normalize.ts
+    parseInvoice.ts
+    parsePriceList.ts
+    supabase.ts
+.gitignore
+AGENTS.md
+CLAUDE.md
+eslint.config.mjs
+next.config.ts
+package.json
+postcss.config.mjs
+README.md
+tsconfig.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/app/api/read-pdf/route.ts">
+import { NextResponse } from 'next/server';
+
+// 1. DÜZELTME: pdf-parse kütüphanesinin tip tanımlamalarında default export eksik. 
+// ESLint ve TypeScript'i kızdırmadan dahil etmenin en güvenli yolu:
+// @ts-expect-error - pdf-parse module lacks proper default export types
+import pdf from 'pdf-parse';
+
+export async function POST(request: Request) {
+  try {
+    const formData = await request.formData();
+    const file = formData.get('file') as File;
+
+    if (!file) {
+      return NextResponse.json({ error: 'Dosya bulunamadı.' }, { status: 400 });
+    }
+
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const data = await pdf(buffer);
+    const text = data.text;
+
+    const results = [];
+    const lines = text.split('\n');
+
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+
+      if (parts.length < 10) continue;
+
+      const parseNumber = (str: string) => parseFloat(str.replace(/\./g, '').replace(',', '.'));
+
+      const netFiyatStr = parts[parts.length - 2];
+      const sonAlisStr = parts[parts.length - 3];
+
+      try {
+        const netFiyat = parseNumber(netFiyatStr);
+        const sonAlis = parseNumber(sonAlisStr);
+
+        if (!isNaN(netFiyat) && !isNaN(sonAlis) && netFiyat > sonAlis) {
+          const farkTl = netFiyat - sonAlis;
+          const farkYuzde = (farkTl / sonAlis) * 100;
+
+          let birimIdx = -1;
+          for (let i = 0; i < parts.length; i++) {
+            if (parts[i] === 'Kg' || parts[i] === 'Adet') {
+              birimIdx = i;
+              break;
+            }
+          }
+
+          if (birimIdx !== -1) {
+            let isimParts = parts.slice(1, birimIdx - 1);
+
+            if (isimParts.length > 1 && isimParts[isimParts.length - 1] === 'paket') {
+              isimParts = parts.slice(1, birimIdx - 3);
+            }
+
+            const isim = isimParts.join(' ');
+
+            results.push({
+              stokAdi: isim,
+              oncekiFiyat: sonAlis,
+              alisFiyati: netFiyat,
+              farkTl: farkTl,
+              farkYuzde: farkYuzde
+            });
+          }
+        }
+      } catch {
+        // 2. DÜZELTME: Kullanılmayan 'e' değişkenini sildik. (no-unused-vars çözüldü)
+        // İlgisiz satırlarda hata olursa sessizce atlıyoruz.
+      }
+    }
+
+    return NextResponse.json({ success: true, data: results });
+
+  } catch (error: unknown) {
+    // 3. DÜZELTME: 'any' yerine 'unknown' kullandık. (no-explicit-any çözüldü)
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("PDF okuma hatası:", errorMessage);
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
+  }
+}
+</file>
+
+<file path="src/app/denetim/page.tsx">
+// ============================================================
+//  src/app/denetim/page.tsx
+//  Denetim: fatura + fiyat listesi/leri seç → karşılaştır →
+//  belirsizleri karara bağla → kaydet → Excel rapor indir
+// ============================================================
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  Download,
+  Loader2,
+  Scale,
+} from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import {
+  adaylariBul,
+  degerlendir,
+  manuelSecimUygula,
+  type DenetimSatiri,
+  type EslesmeAdayi,
+} from "@/lib/matchEngine";
+import { raporIndir } from "@/lib/exportRapor";
+
+type Tedarikci = { id: string; name: string };
+type Fatura = { id: string; dosya_adi: string; fatura_tarihi: string; fatura_no: string | null };
+type Liste = { id: string; liste_etiketi: string | null; dosya_adi: string };
+
+const DURUM_STIL: Record<string, { renk: string; bg: string; etiket: string }> = {
+  fark_var: { renk: "#B3261E", bg: "#FDF4F3", etiket: "Aleyhe fark" },
+  belirsiz_fark_kesin: { renk: "#B3261E", bg: "#FDF4F3", etiket: "Aleyhe (alt sınır kesin)" },
+  belirsiz_cesit: { renk: "#8A6D12", bg: "#FBF6E9", etiket: "Karar bekliyor" },
+  uygun: { renk: "#1F5C3D", bg: "#F2F8F3", etiket: "Uygun" },
+  lehe_fark: { renk: "#5B6660", bg: "#F7F8F6", etiket: "Lehte" },
+  listede_yok: { renk: "#5B6660", bg: "#F7F8F6", etiket: "Listede yok" },
+  fiyat_verilmemis: { renk: "#8A6D12", bg: "#FBF6E9", etiket: "Fiyat verilmemiş" },
+  birim_uyusmazligi: { renk: "#8A6D12", bg: "#FBF6E9", etiket: "Birim uyuşmazlığı" },
+  eslesmedi: { renk: "#5B6660", bg: "#F7F8F6", etiket: "Master ürün yok" },
+};
+
+const tl = (n: number) =>
+  n.toLocaleString("tr-TR", { style: "currency", currency: "TRY", minimumFractionDigits: 2 });
+
+export default function DenetimPage() {
+  const [tedarikciler, setTedarikciler] = useState<Tedarikci[]>([]);
+  const [tedarikciId, setTedarikciId] = useState("");
+  const [faturalar, setFaturalar] = useState<Fatura[]>([]);
+  const [faturaId, setFaturaId] = useState("");
+  const [listeler, setListeler] = useState<Liste[]>([]);
+  const [seciliListeler, setSeciliListeler] = useState<Set<string>>(new Set());
+
+  const [calisiyor, setCalisiyor] = useState(false);
+  const [kaydediyor, setKaydediyor] = useState(false);
+  const [hata, setHata] = useState<string | null>(null);
+  const [basarili, setBasarili] = useState<string | null>(null);
+
+  const [satirlar, setSatirlar] = useState<DenetimSatiri[] | null>(null);
+  const [faturaBilgi, setFaturaBilgi] = useState<Fatura | null>(null);
+  const [havuzHaritasi, setHavuzHaritasi] = useState<Map<string, EslesmeAdayi>>(new Map());
+  const [aramaMetni, setAramaMetni] = useState<Record<string, string>>({});
+  const [tumHavuz, setTumHavuz] = useState<EslesmeAdayi[]>([]);
+
+  // --- Event: ekran ilk açıldığında değil, kullanıcı geldiğinde çekiyoruz ---
+  const baslat = async () => {
+    setHata(null);
+    const { data, error } = await supabase.from("suppliers").select("id, name").order("name");
+    if (error) setHata(error.message);
+    else setTedarikciler(data ?? []);
+  };
+
+  const tedarikciSecildi = async (id: string) => {
+    setTedarikciId(id);
+    setFaturaId("");
+    setSeciliListeler(new Set());
+    setSatirlar(null);
+    if (!id) {
+      setFaturalar([]);
+      setListeler([]);
+      return;
+    }
+    const [f, l] = await Promise.all([
+      supabase
+        .from("invoices")
+        .select("id, dosya_adi, fatura_tarihi, fatura_no")
+        .eq("supplier_id", id)
+        .order("fatura_tarihi", { ascending: false }),
+      supabase
+        .from("price_lists")
+        .select("id, liste_etiketi, dosya_adi")
+        .eq("supplier_id", id)
+        .order("created_at", { ascending: false }),
+    ]);
+    setFaturalar(f.data ?? []);
+    setListeler(l.data ?? []);
+  };
+
+  const listeSec = (id: string) => {
+    setSeciliListeler((prev) => {
+      const yeni = new Set(prev);
+      if (yeni.has(id)) yeni.delete(id);
+      else yeni.add(id);
+      return yeni;
+    });
+  };
+
+  // --- Denetimi çalıştır ---
+  const denetimCalistir = async () => {
+    if (!faturaId || seciliListeler.size === 0) return;
+    setCalisiyor(true);
+    setHata(null);
+    setBasarili(null);
+
+    try {
+      const fatura = faturalar.find((f) => f.id === faturaId) ?? null;
+      setFaturaBilgi(fatura);
+
+      const { data: kalemler, error: kalemHata } = await supabase
+        .from("invoice_items")
+        .select("id, stok_adi, stok_adi_norm, birim_norm, miktar, birim_fiyat, master_product_id")
+        .eq("invoice_id", faturaId);
+      if (kalemHata) throw new Error(kalemHata.message);
+
+      const listeIdListesi = [...seciliListeler];
+      const { data: havuz, error: havuzHata } = await supabase
+        .from("price_list_items")
+        .select("id, urun_adi, urun_adi_norm, birim_norm, birim_fiyat")
+        .in("price_list_id", listeIdListesi);
+      if (havuzHata) throw new Error(havuzHata.message);
+
+      const havuzListesi: EslesmeAdayi[] = (havuz ?? []).map((h) => ({
+        price_list_item_id: h.id,
+        urun_adi: h.urun_adi,
+        birim_norm: h.birim_norm,
+        birim_fiyat: h.birim_fiyat,
+      }));
+      const normMap = new Map<string, string>();
+      const detayMap = new Map<string, EslesmeAdayi>();
+      for (const h of havuz ?? []) {
+        normMap.set(h.id, h.urun_adi_norm);
+        detayMap.set(h.id, {
+          price_list_item_id: h.id,
+          urun_adi: h.urun_adi,
+          birim_norm: h.birim_norm,
+          birim_fiyat: h.birim_fiyat,
+        });
+      }
+      setHavuzHaritasi(detayMap);
+      setTumHavuz(havuzListesi);
+
+      // Master ürün başına öğretilmiş alias'ları çek
+      const masterIdler = [...new Set((kalemler ?? []).map((k) => k.master_product_id).filter(Boolean))];
+      const aliasBySupplier = new Map<string, Set<string>>();
+      if (masterIdler.length > 0) {
+        const { data: aliaslar } = await supabase
+          .from("product_aliases")
+          .select("master_product_id, alias_norm")
+          .eq("supplier_id", tedarikciId)
+          .in("master_product_id", masterIdler as string[]);
+        for (const a of aliaslar ?? []) {
+          if (!a.alias_norm) continue;
+          const set = aliasBySupplier.get(a.master_product_id) ?? new Set<string>();
+          set.add(a.alias_norm);
+          aliasBySupplier.set(a.master_product_id, set);
+        }
+      }
+
+      const sonuc: DenetimSatiri[] = (kalemler ?? []).map((k) => {
+        const aliasSet = k.master_product_id
+          ? aliasBySupplier.get(k.master_product_id) ?? new Set<string>()
+          : new Set<string>();
+
+        if (!k.master_product_id) {
+          return degerlendir(
+            {
+              invoice_item_id: k.id,
+              urun_adi: k.stok_adi,
+              miktar: k.miktar,
+              fatura_fiyati: k.birim_fiyat,
+              fatura_birim_norm: k.birim_norm,
+            },
+            []
+          );
+        }
+
+        const { adaylar } = adaylariBul(k.stok_adi_norm, aliasSet, havuzListesi, normMap);
+        return degerlendir(
+          {
+            invoice_item_id: k.id,
+            urun_adi: k.stok_adi,
+            miktar: k.miktar,
+            fatura_fiyati: k.birim_fiyat,
+            fatura_birim_norm: k.birim_norm,
+          },
+          adaylar
+        );
+      });
+
+      setSatirlar(sonuc);
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Denetim çalıştırılamadı.");
+    } finally {
+      setCalisiyor(false);
+    }
+  };
+
+  // --- Manuel seçim: kullanıcı bir adayı işaretledi ---
+  const manuelSec = (invoiceItemId: string, priceListItemId: string, aliasKaydet: boolean) => {
+    const aday = havuzHaritasi.get(priceListItemId);
+    if (!aday || !satirlar) return;
+
+    setSatirlar((prev) =>
+      (prev ?? []).map((s) =>
+        s.invoice_item_id === invoiceItemId ? manuelSecimUygula(s, aday) : s
+      )
+    );
+
+    if (aliasKaydet) {
+      const satir = satirlar.find((s) => s.invoice_item_id === invoiceItemId);
+      // Alias'ı arka planda kaydet — kullanıcı beklemesin
+      (async () => {
+        const { data: kalem } = await supabase
+          .from("invoice_items")
+          .select("master_product_id")
+          .eq("id", invoiceItemId)
+          .single();
+        if (!kalem?.master_product_id) return;
+        await supabase.from("product_aliases").insert({
+          supplier_id: tedarikciId,
+          master_product_id: kalem.master_product_id,
+          tedarikci_urun_adi: aday.urun_adi,
+          alias_norm: aday.urun_adi.toLocaleLowerCase("tr"),
+          kaynak: "manuel",
+        });
+      })();
+      void satir;
+    }
+  };
+
+  // --- Kaydet ---
+  const kaydet = async () => {
+    if (!satirlar || !faturaId) return;
+    setKaydediyor(true);
+    setHata(null);
+
+    try {
+      const kesin = satirlar.filter((s) => s.durum === "fark_var" || s.durum === "belirsiz_fark_kesin");
+      const toplamFark = kesin.reduce((t, s) => t + (s.fark_toplam ?? 0), 0);
+      const bekleyen = satirlar.filter((s) => s.durum === "belirsiz_cesit").length;
+
+      const { data: run, error: runHata } = await supabase
+        .from("audit_runs")
+        .insert({
+          invoice_id: faturaId,
+          durum: bekleyen > 0 ? "taslak" : "onaylandi",
+          toplam_fark: toplamFark,
+          kontrol_edilen: satirlar.length,
+          fark_bulunan: kesin.length,
+          bekleyen_karar: bekleyen,
+        })
+        .select("id")
+        .single();
+      if (runHata) throw new Error(runHata.message);
+
+      await supabase.from("audit_run_price_lists").insert(
+        [...seciliListeler].map((id) => ({ audit_run_id: run.id, price_list_id: id }))
+      );
+
+      const satirKayitlari = satirlar.map((s) => ({
+        audit_run_id: run.id,
+        invoice_item_id: s.invoice_item_id,
+        price_list_item_id: s.price_list_item_id,
+        urun_adi: s.urun_adi,
+        baz_urun_adi: s.baz_urun_adi,
+        miktar: s.miktar,
+        fatura_fiyati: s.fatura_fiyati,
+        baz_fiyat: s.baz_fiyat,
+        fark_birim: s.fark_birim,
+        fark_toplam: s.fark_toplam,
+        durum: s.durum,
+        secim_tipi: s.secim_tipi,
+        aday_sayisi: s.aday_sayisi,
+        aday_min: s.aday_min,
+        aday_max: s.aday_max,
+      }));
+      const { error: satirHata } = await supabase.from("audit_lines").insert(satirKayitlari);
+      if (satirHata) throw new Error(satirHata.message);
+
+      setBasarili("Denetim kaydedildi.");
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Kaydedilemedi.");
+    } finally {
+      setKaydediyor(false);
+    }
+  };
+
+  const ozet = useMemo(() => {
+    if (!satirlar) return null;
+    const kesin = satirlar.filter((s) => s.durum === "fark_var" || s.durum === "belirsiz_fark_kesin");
+    const toplam = kesin.reduce((t, s) => t + (s.fark_toplam ?? 0), 0);
+    return {
+      toplam,
+      kesinSayi: kesin.length,
+      bekleyen: satirlar.filter((s) => s.durum === "belirsiz_cesit").length,
+      yok: satirlar.filter((s) => s.durum === "listede_yok").length,
+    };
+  }, [satirlar]);
+
+  const indir = () => {
+    if (!satirlar || !faturaBilgi) return;
+    const tedarikciAdi = tedarikciler.find((t) => t.id === tedarikciId)?.name ?? "";
+    const etiketler = listeler
+      .filter((l) => seciliListeler.has(l.id))
+      .map((l) => l.liste_etiketi ?? l.dosya_adi);
+    raporIndir({
+      dosyaAdi: `Fiyat_Farki_Raporu_${faturaBilgi.dosya_adi.replace(/\.[^.]+$/, "")}.xlsx`,
+      faturaDosya: faturaBilgi.dosya_adi,
+      faturaTarihi: faturaBilgi.fatura_tarihi,
+      tedarikci: tedarikciAdi,
+      listeEtiketleri: etiketler,
+      satirlar,
+    });
+  };
+
+  return (
+    <main className="min-h-screen bg-[#F7F8F6] text-[#0F1A14]">
+      <div className="mx-auto w-full max-w-4xl px-4 py-8 sm:px-6 sm:py-12">
+        <Link
+          href="/"
+          className="mb-6 inline-flex items-center gap-1.5 text-sm text-[#5B6660] transition-colors hover:text-[#1F5C3D]"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Ana sayfa
+        </Link>
+
+        <header className="mb-8">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">Adım 5</p>
+          <h1 className="mt-1 flex items-center gap-2 text-2xl font-semibold tracking-tight sm:text-3xl">
+            <Scale className="h-6 w-6 text-[#1F5C3D]" />
+            Fiyat farkı denetimi
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-[#5B6660]">
+            Fatura ve baz alınacak fiyat listesini/listelerini seç. Baz fiyat,
+            seçtiğin listelerin en düşüğüdür.
+          </p>
+        </header>
+
+        {/* Tedarikçileri ilk açılışta çekmek için görünmez tetikleyici */}
+        {tedarikciler.length === 0 && !hata && (
+          <TetikleyiciYukle onYukle={baslat} />
+        )}
+
+        <section className="rounded-2xl border border-[#DDE3DC] bg-white p-5 sm:p-6">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1.5 block text-sm font-medium">Tedarikçi</label>
+              <select
+                value={tedarikciId}
+                onChange={(e) => tedarikciSecildi(e.target.value)}
+                className="w-full rounded-lg border border-[#DDE3DC] bg-white px-3 py-2.5 text-sm outline-none focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+              >
+                <option value="">Seç…</option>
+                {tedarikciler.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-sm font-medium">Fatura</label>
+              <select
+                value={faturaId}
+                onChange={(e) => { setFaturaId(e.target.value); setSatirlar(null); }}
+                disabled={!tedarikciId}
+                className="w-full rounded-lg border border-[#DDE3DC] bg-white px-3 py-2.5 text-sm outline-none focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15 disabled:bg-[#F7F8F6]"
+              >
+                <option value="">Seç…</option>
+                {faturalar.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.dosya_adi} — {f.fatura_tarihi}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {tedarikciId && (
+            <div className="mt-4">
+              <label className="mb-1.5 block text-sm font-medium">
+                Baz alınacak fiyat listesi/listeleri
+              </label>
+              {listeler.length === 0 ? (
+                <p className="text-xs text-[#5B6660]">Bu tedarikçi için kayıtlı liste yok.</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {listeler.map((l) => (
+                    <button
+                      key={l.id}
+                      onClick={() => listeSec(l.id)}
+                      className={
+                        seciliListeler.has(l.id)
+                          ? "rounded-lg border border-[#1F5C3D] bg-[#1F5C3D] px-3 py-1.5 text-xs font-medium text-white"
+                          : "rounded-lg border border-[#DDE3DC] bg-white px-3 py-1.5 text-xs text-[#5B6660] hover:border-[#1F5C3D]"
+                      }
+                    >
+                      {l.liste_etiketi ?? l.dosya_adi}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={denetimCalistir}
+            disabled={calisiyor || !faturaId || seciliListeler.size === 0}
+            className="mt-5 inline-flex items-center justify-center gap-2 rounded-lg bg-[#1F5C3D] px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#184A31] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {calisiyor && <Loader2 className="h-4 w-4 animate-spin" />}
+            Denetimi çalıştır
+          </button>
+        </section>
+
+        {hata && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#E9C9C6] bg-[#FDF4F3] p-4">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-[#B3261E]" />
+            <p className="text-sm leading-relaxed text-[#7A1B15]">{hata}</p>
+          </div>
+        )}
+
+        {ozet && satirlar && (
+          <>
+            <section className="mt-6 grid grid-cols-3 gap-3">
+              <OzetKutu etiket="Garanti aleyhe tutar" deger={tl(ozet.toplam)} renk="#B3261E" />
+              <OzetKutu etiket="Karar bekleyen" deger={String(ozet.bekleyen)} renk="#8A6D12" />
+              <OzetKutu etiket="Listede yok" deger={String(ozet.yok)} renk="#5B6660" />
+            </section>
+
+            {ozet.bekleyen > 0 && (
+              <div className="mt-4 flex gap-3 rounded-xl border border-[#F0E2B8] bg-[#FBF6E9] p-4">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-[#8A6D12]" />
+                <p className="text-sm leading-relaxed text-[#6B540E]">
+                  {ozet.bekleyen} satırda çeşit belirsiz — aşağıda işaretlemeden önce
+                  kaydedebilirsin (taslak olarak kalır) ama rapor eksik olur.
+                </p>
+              </div>
+            )}
+
+            {/* Satırlar */}
+            <section className="mt-4 overflow-hidden rounded-2xl border border-[#DDE3DC] bg-white">
+              <ul className="divide-y divide-[#EDF0ED]">
+                {satirlar.map((s) => (
+                  <SatirKarti
+                    key={s.invoice_item_id}
+                    satir={s}
+                    tumHavuz={tumHavuz}
+                    aramaMetni={aramaMetni[s.invoice_item_id] ?? ""}
+                    aramaDegisti={(v) =>
+                      setAramaMetni((prev) => ({ ...prev, [s.invoice_item_id]: v }))
+                    }
+                    onSec={(priceListItemId, aliasKaydet) =>
+                      manuelSec(s.invoice_item_id, priceListItemId, aliasKaydet)
+                    }
+                  />
+                ))}
+              </ul>
+            </section>
+
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+              <button
+                onClick={kaydet}
+                disabled={kaydediyor}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#1F5C3D] px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#184A31] disabled:opacity-40"
+              >
+                {kaydediyor && <Loader2 className="h-4 w-4 animate-spin" />}
+                Denetimi kaydet
+              </button>
+              <button
+                onClick={indir}
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#DDE3DC] bg-white px-5 py-2.5 text-sm font-medium transition-colors hover:border-[#1F5C3D]"
+              >
+                <Download className="h-4 w-4" />
+                Excel raporu indir
+              </button>
+            </div>
+
+            {basarili && (
+              <div className="mt-4 flex gap-3 rounded-xl border border-[#C3DCC9] bg-[#F2F8F3] p-4">
+                <CheckCircle2 className="h-5 w-5 shrink-0 text-[#1F5C3D]" />
+                <p className="text-sm leading-relaxed text-[#1F5C3D]">{basarili}</p>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </main>
+  );
+}
+
+// Ekran ilk açıldığında tedarikçileri bir kez çekmek için minimal bir
+// yardımcı. useEffect yerine bunu kullanıyoruz çünkü kural gereği
+// effect gövdesinde senkron setState çağıramıyoruz; bu bileşen sadece
+// bir kez mount olur ve async işini kendi effect'inde yürütür — ilk
+// await'ten önce hiçbir setState çağrılmadığı için kural ihlali oluşmaz.
+function TetikleyiciYukle({ onYukle }: { onYukle: () => Promise<void> }) {
+  useEffect(() => {
+    onYukle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
+
+function OzetKutu({ etiket, deger, renk }: { etiket: string; deger: string; renk: string }) {
+  return (
+    <div className="rounded-2xl border border-[#DDE3DC] bg-white p-4 text-center">
+      <div className="text-lg font-semibold tabular-nums sm:text-xl" style={{ color: renk }}>
+        {deger}
+      </div>
+      <div className="mt-0.5 text-[11px] uppercase tracking-wider text-[#5B6660]">{etiket}</div>
+    </div>
+  );
+}
+
+function SatirKarti({
+  satir,
+  tumHavuz,
+  aramaMetni,
+  aramaDegisti,
+  onSec,
+}: {
+  satir: DenetimSatiri;
+  tumHavuz: EslesmeAdayi[];
+  aramaMetni: string;
+  aramaDegisti: (v: string) => void;
+  onSec: (priceListItemId: string, aliasKaydet: boolean) => void;
+}) {
+  const stil = DURUM_STIL[satir.durum] ?? DURUM_STIL.listede_yok;
+  const karaVermeGerekiyor = satir.durum === "belirsiz_cesit" || satir.durum === "listede_yok";
+
+  const aramaSonuclari = useMemo(() => {
+    if (!karaVermeGerekiyor) return [];
+    if (satir.adaylar.length > 0) return satir.adaylar;
+    if (aramaMetni.trim().length < 2) return [];
+    const q = aramaMetni.toLocaleLowerCase("tr");
+    return tumHavuz.filter((h) => h.urun_adi.toLocaleLowerCase("tr").includes(q)).slice(0, 8);
+  }, [karaVermeGerekiyor, satir.adaylar, aramaMetni, tumHavuz]);
+
+  return (
+    <li className="px-5 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{satir.urun_adi}</span>
+        <span className="text-xs tabular-nums text-[#5B6660]">
+          {satir.miktar} × {tl(satir.fatura_fiyati)}
+        </span>
+        <span
+          className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+          style={{ color: stil.renk, backgroundColor: stil.bg }}
+        >
+          {stil.etiket}
+        </span>
+      </div>
+
+      {(satir.durum === "fark_var" || satir.durum === "uygun" || satir.durum === "lehe_fark") && (
+        <p className="mt-1 text-xs text-[#5B6660]">
+          Baz: {satir.baz_urun_adi} — {satir.baz_fiyat !== null ? tl(satir.baz_fiyat) : "—"}
+          {satir.fark_toplam ? ` · Fark: ${tl(satir.fark_toplam)}` : ""}
+        </p>
+      )}
+
+      {satir.durum === "belirsiz_fark_kesin" && (
+        <p className="mt-1 text-xs text-[#7A1B15]">
+          {satir.aday_sayisi} çeşit arasında en pahalısından ({tl(satir.aday_max ?? 0)}) bile yüksek
+          — garanti alt sınır: {tl(satir.fark_toplam ?? 0)}
+        </p>
+      )}
+
+      {karaVermeGerekiyor && (
+        <div className="mt-2 rounded-lg border border-[#EDF0ED] bg-[#FAFBFA] p-3">
+          {satir.adaylar.length === 0 && (
+            <input
+              value={aramaMetni}
+              onChange={(e) => aramaDegisti(e.target.value)}
+              placeholder="Listede ara (örn. çeşit adı)…"
+              className="mb-2 w-full rounded-md border border-[#DDE3DC] px-2.5 py-1.5 text-xs outline-none focus:border-[#1F5C3D]"
+            />
+          )}
+          {aramaSonuclari.length === 0 && satir.adaylar.length === 0 && aramaMetni.trim().length >= 2 && (
+            <p className="text-xs text-[#5B6660]">Eşleşen bulunamadı.</p>
+          )}
+          <div className="flex flex-wrap gap-1.5">
+            {aramaSonuclari.map((a) => (
+              <AdaySecButon key={a.price_list_item_id} aday={a} onSec={onSec} />
+            ))}
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function AdaySecButon({
+  aday,
+  onSec,
+}: {
+  aday: EslesmeAdayi;
+  onSec: (priceListItemId: string, aliasKaydet: boolean) => void;
+}) {
+  return (
+    <button
+      onClick={() => onSec(aday.price_list_item_id, true)}
+      title="Seç ve bu tedarikçi için hatırla"
+      className="rounded-md border border-[#DDE3DC] bg-white px-2.5 py-1 text-xs transition-colors hover:border-[#1F5C3D] hover:bg-[#F3F7F3]"
+    >
+      {aday.urun_adi}
+      <span className="ml-1.5 tabular-nums text-[#5B6660]">
+        {aday.birim_fiyat !== null ? tl(aday.birim_fiyat) : "fiyat yok"}
+      </span>
+    </button>
+  );
+}
+</file>
+
+<file path="src/app/faturalar/page.tsx">
+// ============================================================
+//  src/app/faturalar/page.tsx
+//  Fatura yükleme (ElektraWeb export)
+// ============================================================
+"use client";
+
+import { useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  FileSpreadsheet,
+  Loader2,
+  RotateCcw,
+  UploadCloud,
+} from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import { normalizeName, tarihFromDosyaAdi } from "@/lib/normalize";
+import { parseInvoiceFile, type FaturaKalemi } from "@/lib/parseInvoice";
+
+type Tedarikci = { id: string; name: string };
+
+const PAKET_BOYUTU = 200;
+
+export default function FaturalarPage() {
+  const [tedarikciler, setTedarikciler] = useState<Tedarikci[]>([]);
+  const [tedarikcilerYuklendi, setTedarikcilerYuklendi] = useState(false);
+  const [tedarikciId, setTedarikciId] = useState("");
+  const [faturaNo, setFaturaNo] = useState("");
+  const [faturaTarihi, setFaturaTarihi] = useState("");
+
+  const [dosyaAdi, setDosyaAdi] = useState<string | null>(null);
+  const [kalemler, setKalemler] = useState<FaturaKalemi[] | null>(null);
+  const [atlanan, setAtlanan] = useState<{ satir: number; sebep: string }[]>([]);
+  const [eslesmeMap, setEslesmeMap] = useState<Map<string, boolean>>(new Map());
+
+  const [okuma, setOkuma] = useState(false);
+  const [kaydediyor, setKaydediyor] = useState(false);
+  const [ilerleme, setIlerleme] = useState(0);
+  const [basarili, setBasarili] = useState<string | null>(null);
+  const [hata, setHata] = useState<string | null>(null);
+  const dosyaRef = useRef<HTMLInputElement>(null);
+
+  // Tedarikçileri ve tüm master ürün isimlerini yalnızca ilk kullanımda çek.
+  // Bir EVENT içinde tetikleniyor (dosya seçilince), effect değil.
+  async function bagimlilikYukle() {
+    if (tedarikcilerYuklendi) return;
+    const { data, error } = await supabase.from("suppliers").select("id, name").order("name");
+    if (error) setHata(error.message);
+    else setTedarikciler(data ?? []);
+    setTedarikcilerYuklendi(true);
+  }
+
+  const sifirla = () => {
+    setKalemler(null);
+    setAtlanan([]);
+    setDosyaAdi(null);
+    setIlerleme(0);
+    setBasarili(null);
+    setHata(null);
+    if (dosyaRef.current) dosyaRef.current.value = "";
+  };
+
+  // --- AŞAMA 1: oku, önizle, master ürünlerle eşleş ---
+  const dosyaSecildi = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const dosya = e.target.files?.[0];
+    if (!dosya) return;
+
+    setOkuma(true);
+    setHata(null);
+    setBasarili(null);
+
+    try {
+      await bagimlilikYukle();
+
+      const buf = await dosya.arrayBuffer();
+      const r = parseInvoiceFile(buf);
+
+      // Faturadaki ürün isimleri master ile birebir eşleşiyor olmalı
+      // (ElektraWeb mal kabulde stok kartı seçtirir). Kaç tanesinin
+      // gerçekten eşleştiğini burada, kaydetmeden ÖNCE gösteriyoruz.
+      const normlar = [...new Set(r.kalemler.map((k) => k.stok_adi_norm))];
+      const { data: eslesenler } = await supabase
+        .from("master_products")
+        .select("stok_adi_norm")
+        .in("stok_adi_norm", normlar);
+
+      const bulunanlar = new Set((eslesenler ?? []).map((m) => m.stok_adi_norm));
+      const harita = new Map<string, boolean>();
+      for (const n of normlar) harita.set(n, bulunanlar.has(n));
+
+      setKalemler(r.kalemler);
+      setAtlanan(r.atlananSatirlar);
+      setEslesmeMap(harita);
+      setDosyaAdi(dosya.name);
+
+      // Dosya adından tarih öner — SEN ONAYLAYANA kadar hiçbir yere
+      // kaydedilmez, sadece kutuyu dolduruyoruz.
+      const tarihOneri = tarihFromDosyaAdi(dosya.name);
+      if (tarihOneri) setFaturaTarihi(tarihOneri);
+
+      // Tedarikçi adını dosya adı içinde arayıp öner (basit alt-metin eşleşmesi).
+      const dosyaNorm = normalizeName(dosya.name);
+      const eslesenTedarikci = (tedarikciler.length ? tedarikciler : []).find((t) => {
+        const ilkKelime = normalizeName(t.name).split(" ")[0];
+        return ilkKelime.length >= 3 && dosyaNorm.includes(ilkKelime);
+      });
+      if (eslesenTedarikci) setTedarikciId(eslesenTedarikci.id);
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Dosya okunamadı.");
+      setKalemler(null);
+    } finally {
+      setOkuma(false);
+    }
+  };
+
+  // --- AŞAMA 2: kaydet ---
+  const kaydet = async () => {
+    if (!kalemler || !dosyaAdi || !tedarikciId || !faturaTarihi) return;
+
+    setKaydediyor(true);
+    setHata(null);
+    setIlerleme(0);
+
+    try {
+      const { data: fatura, error: faturaHata } = await supabase
+        .from("invoices")
+        .insert({
+          supplier_id: tedarikciId,
+          fatura_no: faturaNo.trim() || null,
+          fatura_tarihi: faturaTarihi,
+          dosya_adi: dosyaAdi,
+        })
+        .select("id")
+        .single();
+
+      if (faturaHata) {
+        // Aynı dosya adıyla bu tedarikçiye ikinci kez fatura yüklenmeye
+        // çalışılırsa buraya düşer (UNIQUE kısıtı). Anlaşılır mesaj verelim.
+        if (faturaHata.code === "23505") {
+          throw new Error(
+            "Bu fatura zaten yüklenmiş görünüyor (aynı tedarikçi + aynı dosya adı). " +
+            "Aynı iade talebini iki kez oluşturmamak için tekrar yüklenmedi."
+          );
+        }
+        throw new Error(faturaHata.message);
+      }
+
+      // Master ürün eşleşmesi olanları bağla, olmayanları boş bırak —
+      // eşleştirme ekranında elle bağlanacak.
+      const normToId = new Map<string, string>();
+      const normlar = [...eslesmeMap.keys()];
+      if (normlar.length > 0) {
+        const { data } = await supabase
+          .from("master_products")
+          .select("id, stok_adi_norm")
+          .in("stok_adi_norm", normlar);
+        for (const m of data ?? []) normToId.set(m.stok_adi_norm, m.id);
+      }
+
+      const satirlar = kalemler.map((k) => ({
+        invoice_id: fatura.id,
+        satir_no: k.satir_no,
+        stok_adi: k.stok_adi,
+        stok_adi_norm: k.stok_adi_norm,
+        birim: k.birim,
+        birim_norm: k.birim_norm,
+        miktar: k.miktar,
+        birim_fiyat: k.birim_fiyat,
+        satir_toplam: k.satir_toplam,
+        kdv_orani: k.kdv_orani,
+        vergi_dahil_toplam: k.vergi_dahil_toplam,
+        checksum_ok: k.checksum_ok,
+        master_product_id: normToId.get(k.stok_adi_norm) ?? null,
+      }));
+
+      let gonderilen = 0;
+      for (let i = 0; i < satirlar.length; i += PAKET_BOYUTU) {
+        const paket = satirlar.slice(i, i + PAKET_BOYUTU);
+        const { error } = await supabase.from("invoice_items").insert(paket);
+        if (error) throw new Error(error.message);
+        gonderilen += paket.length;
+        setIlerleme(Math.round((gonderilen / satirlar.length) * 100));
+      }
+
+      setBasarili(`Fatura kaydedildi — ${gonderilen} satır.`);
+      sifirla();
+      setFaturaNo("");
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Kayıt sırasında hata oluştu.");
+    } finally {
+      setKaydediyor(false);
+    }
+  };
+
+  const eslesenSayi = useMemo(() => {
+    if (!kalemler) return 0;
+    return kalemler.filter((k) => eslesmeMap.get(k.stok_adi_norm)).length;
+  }, [kalemler, eslesmeMap]);
+
+  const checksumSorunlu = useMemo(() => {
+    if (!kalemler) return [];
+    return kalemler.filter((k) => k.checksum_ok === false);
+  }, [kalemler]);
+
+  return (
+    <main className="min-h-screen bg-[#F7F8F6] text-[#0F1A14]">
+      <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 sm:py-12">
+        <Link
+          href="/"
+          className="mb-6 inline-flex items-center gap-1.5 text-sm text-[#5B6660] transition-colors hover:text-[#1F5C3D]"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Ana sayfa
+        </Link>
+
+        <header className="mb-8">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+            Adım 4
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+            Fatura yükle
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-[#5B6660]">
+            ElektraWeb fatura satırı export&apos;unu yükle. Tarih ve tedarikçi dosya
+            adından tahmin edilir — kaydetmeden önce kontrol et.
+          </p>
+        </header>
+
+        {/* Dosya */}
+        <section className="rounded-2xl border border-[#DDE3DC] bg-white p-5 sm:p-6">
+          <label
+            htmlFor="dosya"
+            className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-[#C6D0C6] bg-[#FAFBFA] px-4 py-10 text-center transition-colors hover:border-[#1F5C3D] hover:bg-[#F3F7F3] focus-within:ring-2 focus-within:ring-[#1F5C3D]"
+          >
+            {okuma ? (
+              <Loader2 className="h-7 w-7 animate-spin text-[#1F5C3D]" />
+            ) : (
+              <UploadCloud className="h-7 w-7 text-[#1F5C3D]" />
+            )}
+            <span className="text-sm font-medium">
+              {okuma ? "Fatura okunuyor…" : "Fatura Excel'ini seç"}
+            </span>
+            <span className="text-xs text-[#5B6660]">.xlsx — ilk sayfa okunur</span>
+            <input
+              id="dosya"
+              ref={dosyaRef}
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={dosyaSecildi}
+              disabled={okuma || kaydediyor}
+              className="sr-only"
+            />
+          </label>
+        </section>
+
+        {hata && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#E9C9C6] bg-[#FDF4F3] p-4">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-[#B3261E]" />
+            <p className="text-sm leading-relaxed text-[#7A1B15]">{hata}</p>
+          </div>
+        )}
+
+        {basarili && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#C3DCC9] bg-[#F2F8F3] p-4">
+            <CheckCircle2 className="h-5 w-5 shrink-0 text-[#1F5C3D]" />
+            <p className="text-sm leading-relaxed text-[#1F5C3D]">{basarili}</p>
+          </div>
+        )}
+
+        {kalemler && dosyaAdi && (
+          <>
+            {/* Fatura bilgileri — dosya adından öneri, sen onaylıyorsun */}
+            <section className="mt-4 rounded-2xl border border-[#DDE3DC] bg-white p-5 sm:p-6">
+              <div className="flex items-center gap-2 pb-4">
+                <FileSpreadsheet className="h-4 w-4 text-[#1F5C3D]" />
+                <span className="truncate text-sm font-medium">{dosyaAdi}</span>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div>
+                  <label htmlFor="ted" className="mb-1.5 block text-sm font-medium">
+                    Tedarikçi
+                  </label>
+                  <select
+                    id="ted"
+                    value={tedarikciId}
+                    onChange={(e) => setTedarikciId(e.target.value)}
+                    className="w-full rounded-lg border border-[#DDE3DC] bg-white px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+                  >
+                    <option value="">Seç…</option>
+                    {tedarikciler.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="tarih" className="mb-1.5 block text-sm font-medium">
+                    Fatura tarihi
+                  </label>
+                  <input
+                    id="tarih"
+                    type="date"
+                    value={faturaTarihi}
+                    onChange={(e) => setFaturaTarihi(e.target.value)}
+                    className="w-full rounded-lg border border-[#DDE3DC] px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+                  />
+                  {!tarihFromDosyaAdi(dosyaAdi) && (
+                    <p className="mt-1.5 text-xs text-[#8A6D12]">
+                      Dosya adından tarih çıkarılamadı, elle gir.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="no" className="mb-1.5 block text-sm font-medium">
+                    Fatura no{" "}
+                    <span className="font-normal text-[#5B6660]">(isteğe bağlı)</span>
+                  </label>
+                  <input
+                    id="no"
+                    value={faturaNo}
+                    onChange={(e) => setFaturaNo(e.target.value)}
+                    placeholder="Export'ta yoksa boş bırak"
+                    className="w-full rounded-lg border border-[#DDE3DC] px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-[#B4BDB6] focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* Önizleme */}
+            <section className="mt-4 overflow-hidden rounded-2xl border border-[#DDE3DC] bg-white">
+              <div className="grid grid-cols-3 divide-x divide-[#DDE3DC] border-b border-[#DDE3DC]">
+                <Kutu etiket="Satır" deger={kalemler.length} />
+                <Kutu
+                  etiket="Master ürünle eşleşen"
+                  deger={eslesenSayi}
+                  vurgu={eslesenSayi === kalemler.length ? "#1F5C3D" : "#8A6D12"}
+                />
+                <Kutu
+                  etiket="Eşleşmeyen"
+                  deger={kalemler.length - eslesenSayi}
+                  vurgu={kalemler.length - eslesenSayi > 0 ? "#B3261E" : undefined}
+                />
+              </div>
+
+              {kalemler.length - eslesenSayi > 0 && (
+                <p className="border-b border-[#DDE3DC] px-5 py-3 text-xs leading-relaxed text-[#5B6660]">
+                  Eşleşmeyen satırlar yine de kaydedilir — bağlantısı boş kalır ve
+                  denetim ekranında elle bağlarsın.
+                </p>
+              )}
+
+              {checksumSorunlu.length > 0 && (
+                <div className="flex gap-3 border-b border-[#DDE3DC] bg-[#FDF4F3] px-5 py-3">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-[#B3261E]" />
+                  <p className="text-xs leading-relaxed text-[#7A1B15]">
+                    {checksumSorunlu.length} satırda KDV kontrolü tutmuyor —
+                    Satır Toplam × (1+KDV) faturadaki Vergi Dahil Toplam ile
+                    örtüşmüyor. Bir okuma hatası olabilir, satırları kontrol et:{" "}
+                    {checksumSorunlu.map((k) => k.stok_adi).join(", ")}
+                  </p>
+                </div>
+              )}
+
+              {atlanan.length > 0 && (
+                <p className="border-b border-[#DDE3DC] px-5 py-3 text-xs leading-relaxed text-[#8A6D12]">
+                  {atlanan.length} satır atlandı: {atlanan.map((a) => `satır ${a.satir} (${a.sebep})`).join(", ")}
+                </p>
+              )}
+
+              <div className="max-h-80 overflow-y-auto border-b border-[#DDE3DC]">
+                <table className="w-full text-xs">
+                  <tbody className="divide-y divide-[#EDF0ED]">
+                    {kalemler.map((k) => {
+                      const eslesti = eslesmeMap.get(k.stok_adi_norm);
+                      return (
+                        <tr key={k.satir_no}>
+                          <td className="px-5 py-1.5">
+                            <span
+                              className={
+                                eslesti
+                                  ? "inline-block h-1.5 w-1.5 rounded-full bg-[#1F5C3D]"
+                                  : "inline-block h-1.5 w-1.5 rounded-full bg-[#B3261E]"
+                              }
+                            />
+                          </td>
+                          <td className="py-1.5 pr-2">{k.stok_adi}</td>
+                          <td className="py-1.5 pr-2 text-[#5B6660]">{k.birim_norm}</td>
+                          <td className="py-1.5 pr-2 text-right tabular-nums text-[#5B6660]">
+                            {k.miktar}
+                          </td>
+                          <td className="px-5 py-1.5 text-right tabular-nums">
+                            {k.birim_fiyat.toLocaleString("tr-TR", {
+                              minimumFractionDigits: 2,
+                            })}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <button
+                  onClick={sifirla}
+                  disabled={kaydediyor}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-[#5B6660] transition-colors hover:bg-[#F0F3F0] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] disabled:opacity-40"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  Başka dosya
+                </button>
+
+                <button
+                  onClick={kaydet}
+                  disabled={kaydediyor || !tedarikciId || !faturaTarihi}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#1F5C3D] px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#184A31] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {kaydediyor && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {kaydediyor ? `Kaydediliyor… %${ilerleme}` : `${kalemler.length} satırı kaydet`}
+                </button>
+              </div>
+
+              {kaydediyor && (
+                <div className="h-1 w-full bg-[#EDF0ED]">
+                  <div
+                    className="h-full bg-[#C9A227] transition-[width] duration-300 motion-reduce:transition-none"
+                    style={{ width: `${ilerleme}%` }}
+                  />
+                </div>
+              )}
+            </section>
+          </>
+        )}
+      </div>
+    </main>
+  );
+}
+
+function Kutu({ etiket, deger, vurgu }: { etiket: string; deger: number; vurgu?: string }) {
+  return (
+    <div className="px-4 py-4 text-center sm:px-5">
+      <div className="text-xl font-semibold tabular-nums sm:text-2xl" style={vurgu ? { color: vurgu } : undefined}>
+        {deger}
+      </div>
+      <div className="mt-0.5 text-[11px] uppercase tracking-wider text-[#5B6660]">{etiket}</div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/app/fiyat-listeleri/page.tsx">
+// ============================================================
+//  src/app/fiyat-listeleri/page.tsx
+//  Tedarikçi fiyat listesi yükleme (Excel)
+// ============================================================
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  FileSpreadsheet,
+  Loader2,
+  RotateCcw,
+  UploadCloud,
+} from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import { parsePriceListFile, type ListeParseSonucu } from "@/lib/parsePriceList";
+
+type Tedarikci = { id: string; name: string };
+type KayitliListe = {
+  id: string;
+  liste_etiketi: string | null;
+  dosya_adi: string;
+  yuklenme_tarihi: string;
+};
+
+const PAKET_BOYUTU = 400;
+
+export default function FiyatListeleriPage() {
+  const [tedarikciler, setTedarikciler] = useState<Tedarikci[]>([]);
+  const [tedarikciId, setTedarikciId] = useState("");
+  const [etiket, setEtiket] = useState("");
+
+  const [dosyaAdi, setDosyaAdi] = useState<string | null>(null);
+  const [sonuc, setSonuc] = useState<ListeParseSonucu | null>(null);
+  const [kayitli, setKayitli] = useState<KayitliListe[]>([]);
+
+  const [okuma, setOkuma] = useState(false);
+  const [kaydediyor, setKaydediyor] = useState(false);
+  const [ilerleme, setIlerleme] = useState(0);
+  const [basarili, setBasarili] = useState<string | null>(null);
+  const [hata, setHata] = useState<string | null>(null);
+  const dosyaRef = useRef<HTMLInputElement>(null);
+
+  // --- Tedarikçileri getir ---
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("suppliers")
+        .select("id, name")
+        .order("name");
+      if (error) setHata(error.message);
+      else setTedarikciler(data ?? []);
+    })();
+  }, []);
+
+  // --- Seçili tedarikçinin kayıtlı listeleri ---
+  // İlk await'ten önce setState yok (bkz. react-hooks/set-state-in-effect).
+  const kayitliGetir = useCallback(async (id: string) => {
+    const { data } = await supabase
+      .from("price_lists")
+      .select("id, liste_etiketi, dosya_adi, yuklenme_tarihi")
+      .eq("supplier_id", id)
+      .order("yuklenme_tarihi", { ascending: false });
+    setKayitli(data ?? []);
+  }, []);
+
+  // Bu bir EFFECT değil, bir EVENT HANDLER.
+  // Tedarikçi değişmesi kullanıcının yaptığı bir eylemdir; onun sonucunu
+  // effect ile "senkronize etmeye" çalışmak gereksiz. React'in kendi
+  // tavsiyesi de bu: "You Might Not Need an Effect".
+  // Event handler içindeki setState çağrıları lint kuralının kapsamı dışında.
+  const tedarikciSecildi = async (id: string) => {
+    setTedarikciId(id);
+    setKayitli([]);
+    if (!id) return;
+    await kayitliGetir(id);
+  };
+
+  const sifirla = () => {
+    setSonuc(null);
+    setDosyaAdi(null);
+    setIlerleme(0);
+    setBasarili(null);
+    setHata(null);
+    if (dosyaRef.current) dosyaRef.current.value = "";
+  };
+
+  // --- AŞAMA 1: oku ve önizle ---
+  const dosyaSecildi = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const dosya = e.target.files?.[0];
+    if (!dosya) return;
+
+    setOkuma(true);
+    setHata(null);
+    setBasarili(null);
+
+    try {
+      const buf = await dosya.arrayBuffer();
+      const r = parsePriceListFile(buf);
+      setSonuc(r);
+      setDosyaAdi(dosya.name);
+      // Etiket boşsa dosya adından bir başlangıç önerisi ver
+      if (etiket.trim() === "") setEtiket(dosya.name.replace(/\.[^.]+$/, ""));
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Dosya okunamadı.");
+      setSonuc(null);
+    } finally {
+      setOkuma(false);
+    }
+  };
+
+  // --- AŞAMA 2: kaydet ---
+  const kaydet = async () => {
+    if (!sonuc || !tedarikciId || !dosyaAdi) return;
+    if (etiket.trim() === "") {
+      setHata("Listeye bir etiket ver — denetim ekranında bununla seçeceksin.");
+      return;
+    }
+
+    setKaydediyor(true);
+    setHata(null);
+    setIlerleme(0);
+
+    try {
+      const { data: liste, error: listeHata } = await supabase
+        .from("price_lists")
+        .insert({
+          supplier_id: tedarikciId,
+          dosya_adi: dosyaAdi,
+          kaynak_tip: "excel",
+          liste_etiketi: etiket.trim(),
+          dosyadaki_tarih: sonuc.dosyadakiTarih,
+        })
+        .select("id")
+        .single();
+
+      if (listeHata) throw new Error(listeHata.message);
+
+      const satirlar = sonuc.kalemler.map((k) => ({
+        price_list_id: liste.id,
+        kategori: k.kategori,
+        sira_no: k.sira_no,
+        urun_adi: k.urun_adi,
+        urun_adi_norm: k.urun_adi_norm,
+        birim: k.birim,
+        birim_norm: k.birim_norm,
+        birim_fiyat: k.birim_fiyat,
+      }));
+
+      let gonderilen = 0;
+      for (let i = 0; i < satirlar.length; i += PAKET_BOYUTU) {
+        const paket = satirlar.slice(i, i + PAKET_BOYUTU);
+        const { error } = await supabase.from("price_list_items").insert(paket);
+        if (error) throw new Error(error.message);
+        gonderilen += paket.length;
+        setIlerleme(Math.round((gonderilen / satirlar.length) * 100));
+      }
+
+      setBasarili(`"${etiket.trim()}" listesi kaydedildi — ${gonderilen} kalem.`);
+      setSonuc(null);
+      setDosyaAdi(null);
+      setEtiket("");
+      if (dosyaRef.current) dosyaRef.current.value = "";
+      await kayitliGetir(tedarikciId);
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Kayıt sırasında hata oluştu.");
+    } finally {
+      setKaydediyor(false);
+    }
+  };
+
+  const kategoriOzeti = useMemo(() => {
+    if (!sonuc) return [];
+    const m = new Map<string, number>();
+    for (const k of sonuc.kalemler) {
+      const ad = k.kategori ?? "Kategorisiz";
+      m.set(ad, (m.get(ad) ?? 0) + 1);
+    }
+    return [...m.entries()];
+  }, [sonuc]);
+
+  const fiyatli = sonuc
+    ? sonuc.kalemler.length - sonuc.fiyatsiz.length
+    : 0;
+
+  return (
+    <main className="min-h-screen bg-[#F7F8F6] text-[#0F1A14]">
+      <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 sm:py-12">
+        <Link
+          href="/"
+          className="mb-6 inline-flex items-center gap-1.5 text-sm text-[#5B6660] transition-colors hover:text-[#1F5C3D]"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Ana sayfa
+        </Link>
+
+        <header className="mb-8">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+            Adım 3
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+            Fiyat listesi yükle
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-[#5B6660]">
+            Excel listeyi yükle. Denetim yaparken bu listelerden bir veya
+            birkaçını seçeceksin; baz fiyat, seçtiklerinin en düşüğü olacak.
+          </p>
+        </header>
+
+        {/* Tedarikçi + etiket */}
+        <section className="rounded-2xl border border-[#DDE3DC] bg-white p-5 sm:p-6">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="ted" className="mb-1.5 block text-sm font-medium">
+                Tedarikçi
+              </label>
+              <select
+                id="ted"
+                value={tedarikciId}
+                onChange={(e) => tedarikciSecildi(e.target.value)}
+                className="w-full rounded-lg border border-[#DDE3DC] bg-white px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+              >
+                <option value="">Seç…</option>
+                {tedarikciler.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+              {tedarikciler.length === 0 && (
+                <p className="mt-1.5 text-xs text-[#5B6660]">
+                  Henüz tedarikçi yok —{" "}
+                  <Link href="/tedarikciler" className="text-[#1F5C3D] underline">
+                    önce ekle
+                  </Link>
+                  .
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="etiket" className="mb-1.5 block text-sm font-medium">
+                Liste etiketi
+              </label>
+              <input
+                id="etiket"
+                value={etiket}
+                onChange={(e) => setEtiket(e.target.value)}
+                placeholder="Liste B — 11 Ağustos"
+                className="w-full rounded-lg border border-[#DDE3DC] px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-[#B4BDB6] focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Dosya */}
+        <section className="mt-4 rounded-2xl border border-[#DDE3DC] bg-white p-5 sm:p-6">
+          <label
+            htmlFor="dosya"
+            className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-[#C6D0C6] bg-[#FAFBFA] px-4 py-10 text-center transition-colors hover:border-[#1F5C3D] hover:bg-[#F3F7F3] focus-within:ring-2 focus-within:ring-[#1F5C3D]"
+          >
+            {okuma ? (
+              <Loader2 className="h-7 w-7 animate-spin text-[#1F5C3D]" />
+            ) : (
+              <UploadCloud className="h-7 w-7 text-[#1F5C3D]" />
+            )}
+            <span className="text-sm font-medium">
+              {okuma ? "Liste okunuyor…" : "Fiyat listesi Excel'ini seç"}
+            </span>
+            <span className="text-xs text-[#5B6660]">.xlsx — ilk sayfa okunur</span>
+            <input
+              id="dosya"
+              ref={dosyaRef}
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={dosyaSecildi}
+              disabled={okuma || kaydediyor}
+              className="sr-only"
+            />
+          </label>
+        </section>
+
+        {hata && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#E9C9C6] bg-[#FDF4F3] p-4">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-[#B3261E]" />
+            <p className="text-sm leading-relaxed text-[#7A1B15]">{hata}</p>
+          </div>
+        )}
+
+        {basarili && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#C3DCC9] bg-[#F2F8F3] p-4">
+            <CheckCircle2 className="h-5 w-5 shrink-0 text-[#1F5C3D]" />
+            <p className="text-sm leading-relaxed text-[#1F5C3D]">{basarili}</p>
+          </div>
+        )}
+
+        {/* Önizleme */}
+        {sonuc && dosyaAdi && (
+          <section className="mt-4 overflow-hidden rounded-2xl border border-[#DDE3DC] bg-white">
+            <div className="flex items-center gap-2 border-b border-[#DDE3DC] px-5 py-4">
+              <FileSpreadsheet className="h-4 w-4 text-[#1F5C3D]" />
+              <span className="truncate text-sm font-medium">{dosyaAdi}</span>
+            </div>
+
+            <div className="grid grid-cols-3 divide-x divide-[#DDE3DC] border-b border-[#DDE3DC]">
+              <Kutu etiket="Kalem" deger={sonuc.kalemler.length} />
+              <Kutu etiket="Fiyatlı" deger={fiyatli} vurgu="#1F5C3D" />
+              <Kutu
+                etiket="Fiyatsız"
+                deger={sonuc.fiyatsiz.length}
+                vurgu={sonuc.fiyatsiz.length > 0 ? "#8A6D12" : undefined}
+              />
+            </div>
+
+            <div className="border-b border-[#DDE3DC] px-5 py-4">
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                {kategoriOzeti.map(([ad, adet]) => (
+                  <span key={ad} className="text-xs text-[#5B6660]">
+                    <span className="font-semibold text-[#0F1A14]">{adet}</span> · {ad}
+                  </span>
+                ))}
+              </div>
+              {sonuc.dosyadakiTarih && (
+                <p className="mt-3 text-xs leading-relaxed text-[#5B6660]">
+                  Dosyada yazan tarih: <strong>{sonuc.dosyadakiTarih}</strong> — bilgi
+                  olarak saklanır, hesapta kullanılmaz.
+                </p>
+              )}
+            </div>
+
+            {sonuc.fiyatsiz.length > 0 && (
+              <div className="border-b border-[#DDE3DC] px-5 py-4">
+                <p className="mb-2 text-xs leading-relaxed text-[#5B6660]">
+                  Bu kalemlerde fiyat yok (listede <code>0</code> veya <code>-</code>).
+                  Kaydedilir ama kıyaslamada kullanılmaz — bedava sayılmaz.
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {sonuc.fiyatsiz.map((ad, i) => (
+                    <span
+                      key={`${ad}-${i}`}
+                      className="rounded-md bg-[#F5EEDA] px-2 py-0.5 text-xs text-[#8A6D12]"
+                    >
+                      {ad}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {sonuc.cakisan.length > 0 && (
+              <div className="border-b border-[#DDE3DC] px-5 py-4">
+                <p className="text-xs leading-relaxed text-[#B3261E]">
+                  Aynı ürün listede birden fazla kez geçiyor, ilki alındı:{" "}
+                  {sonuc.cakisan.join(", ")}
+                </p>
+              </div>
+            )}
+
+            {/* İlk kalemler */}
+            <div className="max-h-72 overflow-y-auto border-b border-[#DDE3DC]">
+              <table className="w-full text-xs">
+                <tbody className="divide-y divide-[#EDF0ED]">
+                  {sonuc.kalemler.map((k, i) => (
+                    <tr key={`${k.urun_adi_norm}-${i}`}>
+                      <td className="px-5 py-1.5 text-[#5B6660]">{k.kategori}</td>
+                      <td className="px-2 py-1.5">{k.urun_adi}</td>
+                      <td className="px-2 py-1.5 text-[#5B6660]">{k.birim_norm}</td>
+                      <td className="px-5 py-1.5 text-right tabular-nums">
+                        {k.birim_fiyat === null ? (
+                          <span className="text-[#8A6D12]">fiyat yok</span>
+                        ) : (
+                          k.birim_fiyat.toLocaleString("tr-TR", {
+                            minimumFractionDigits: 2,
+                          })
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                onClick={sifirla}
+                disabled={kaydediyor}
+                className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-[#5B6660] transition-colors hover:bg-[#F0F3F0] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] disabled:opacity-40"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Başka dosya
+              </button>
+
+              <button
+                onClick={kaydet}
+                disabled={kaydediyor || !tedarikciId}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#1F5C3D] px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#184A31] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {kaydediyor && <Loader2 className="h-4 w-4 animate-spin" />}
+                {kaydediyor
+                  ? `Kaydediliyor… %${ilerleme}`
+                  : `${sonuc.kalemler.length} kalemi kaydet`}
+              </button>
+            </div>
+
+            {kaydediyor && (
+              <div className="h-1 w-full bg-[#EDF0ED]">
+                <div
+                  className="h-full bg-[#C9A227] transition-[width] duration-300 motion-reduce:transition-none"
+                  style={{ width: `${ilerleme}%` }}
+                />
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Kayıtlı listeler */}
+        {tedarikciId && (
+          <section className="mt-8">
+            <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+              Bu tedarikçinin kayıtlı listeleri {kayitli.length > 0 && `(${kayitli.length})`}
+            </h2>
+            {kayitli.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-[#DDE3DC] px-5 py-6 text-center text-sm text-[#5B6660]">
+                Henüz liste yok.
+              </div>
+            ) : (
+              <ul className="divide-y divide-[#DDE3DC] overflow-hidden rounded-xl border border-[#DDE3DC] bg-white">
+                {kayitli.map((l) => (
+                  <li key={l.id} className="flex items-baseline gap-3 px-5 py-3">
+                    <span className="flex-1 text-sm font-medium">
+                      {l.liste_etiketi ?? l.dosya_adi}
+                    </span>
+                    <span className="text-xs tabular-nums text-[#5B6660]">
+                      {new Date(l.yuklenme_tarihi).toLocaleString("tr-TR", {
+                        dateStyle: "short",
+                        timeStyle: "short",
+                      })}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+      </div>
+    </main>
+  );
+}
+
+function Kutu({
+  etiket,
+  deger,
+  vurgu,
+}: {
+  etiket: string;
+  deger: number;
+  vurgu?: string;
+}) {
+  return (
+    <div className="px-4 py-4 text-center sm:px-5">
+      <div
+        className="text-xl font-semibold tabular-nums sm:text-2xl"
+        style={vurgu ? { color: vurgu } : undefined}
+      >
+        {deger}
+      </div>
+      <div className="mt-0.5 text-[11px] uppercase tracking-wider text-[#5B6660]">
+        {etiket}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/app/import/page.tsx">
+// ============================================================
+//  src/app/import/page.tsx
+//  STOKLAR.xlsx -> Supabase master_products aktarım ekranı
+// ============================================================
+"use client";
+
+import { useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  FileSpreadsheet,
+  Loader2,
+  RotateCcw,
+  UploadCloud,
+} from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import {
+  cleanText,
+  normalizeDate,
+  normalizeName,
+  normalizeStockCode,
+} from "@/lib/normalize";
+
+// ---- Tipler ------------------------------------------------
+
+type MasterRow = {
+  stok_kodu: string;
+  stok_adi: string;
+  stok_adi_norm: string;
+  stok_birim: string | null;
+  stok_grup: string | null;
+  son_alis_tarihi: string | null;
+  son_satici: string | null;
+};
+
+type Sorun = {
+  satir: number;
+  kod: string;
+  ad: string;
+  sebep: string;
+};
+
+type Onizleme = {
+  dosyaAdi: string;
+  toplamSatir: number;
+  gecerli: MasterRow[];
+  sorunlar: Sorun[];
+  tekrarEden: number; // dosyada birebir tekrar ettiği için teke indirilen satır
+};
+
+const PAKET_BOYUTU = 400; // Supabase'e kaç satırlık paketler halinde gönderelim
+
+// ---- Yardımcı: Excel başlıklarını tolere ederek bul ---------
+// "Stok Adı", "STOK ADI", "Stok adi" hepsi aynı sütundur.
+function basligiBul(basliklar: string[], adaylar: string[]): string | null {
+  const hedef = adaylar.map(normalizeName);
+  return basliklar.find((b) => hedef.includes(normalizeName(b))) ?? null;
+}
+
+export default function ImportPage() {
+  const [onizleme, setOnizleme] = useState<Onizleme | null>(null);
+  const [okuma, setOkuma] = useState(false);
+  const [aktarim, setAktarim] = useState(false);
+  const [ilerleme, setIlerleme] = useState(0);
+  const [sonuc, setSonuc] = useState<string | null>(null);
+  const [hata, setHata] = useState<string | null>(null);
+  const dosyaRef = useRef<HTMLInputElement>(null);
+
+  const hepsiniSifirla = () => {
+    setOnizleme(null);
+    setIlerleme(0);
+    setSonuc(null);
+    setHata(null);
+    if (dosyaRef.current) dosyaRef.current.value = "";
+  };
+
+  // ---- AŞAMA 1: Dosyayı oku ve denetle ---------------------
+  const dosyaSecildi = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const dosya = e.target.files?.[0];
+    if (!dosya) return;
+
+    setOkuma(true);
+    setHata(null);
+    setSonuc(null);
+
+    try {
+      const buf = await dosya.arrayBuffer();
+      // cellDates: true -> tarih hücreleri sayı değil Date olarak gelsin
+      const wb = XLSX.read(buf, { cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const satirlar = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
+        defval: null,
+      });
+
+      if (satirlar.length === 0) {
+        throw new Error("Dosyanın ilk sayfasında veri bulunamadı.");
+      }
+
+      const basliklar = Object.keys(satirlar[0]);
+      const cKod = basligiBul(basliklar, ["Stok Kodu", "Kod"]);
+      const cAd = basligiBul(basliklar, ["Stok Adı", "Ürün Adı"]);
+      const cBirim = basligiBul(basliklar, ["Stok Birim", "Birim"]);
+      const cGrup = basligiBul(basliklar, ["Stok Grup", "Grup"]);
+      const cTarih = basligiBul(basliklar, ["Son Alış Tarihi"]);
+      const cSatici = basligiBul(basliklar, ["Son Satıcı"]);
+
+      if (!cKod || !cAd) {
+        throw new Error(
+          `"Stok Kodu" ve "Stok Adı" sütunları bulunamadı. Dosyadaki başlıklar: ${basliklar.join(", ")}`
+        );
+      }
+
+      // TypeScript'in burada yaptığı "null değil" daraltmasını closure'lara
+      // güvenle taşımak için sütun adlarını ayrı sabitlere alıyoruz.
+      const sKod: string = cKod;
+      const sAd: string = cAd;
+
+      // Mükerrer kodları iki gruba ayırıyoruz:
+      //   a) Satır birebir aynı  -> masum export tekrarı, sessizce teke indir
+      //   b) Aynı kod farklı ürünlerde -> gerçek çakışma, ikisini de atla ve göster
+      // Bu ayrımı yapmamızın sebebi: gereksiz uyarı çıkaran bir denetim
+      // katmanına bir süre sonra kimse bakmaz.
+      const imzaUret = (s: Record<string, unknown>, kod: string) =>
+        [
+          kod,
+          normalizeName(s[sAd]),
+          cBirim ? normalizeName(s[cBirim]) : "",
+          cGrup ? normalizeName(s[cGrup]) : "",
+        ].join("|");
+
+      const kodImzalari = new Map<string, Set<string>>();
+      for (const s of satirlar) {
+        const kod = normalizeStockCode(s[sKod]);
+        if (!kod) continue;
+        if (!kodImzalari.has(kod)) kodImzalari.set(kod, new Set<string>());
+        kodImzalari.get(kod)!.add(imzaUret(s, kod));
+      }
+
+      const gecerli: MasterRow[] = [];
+      const sorunlar: Sorun[] = [];
+      const eklenenKodlar = new Set<string>();
+      let tekrarEden = 0;
+
+      satirlar.forEach((s, i) => {
+        const satirNo = i + 2; // +2: Excel'de 1. satır başlık
+        const kod = normalizeStockCode(s[sKod]);
+        const ad = cleanText(s[sAd]);
+
+        if (!kod) {
+          sorunlar.push({ satir: satirNo, kod: "—", ad: ad ?? "—", sebep: "Stok kodu boş" });
+          return;
+        }
+        if (!ad) {
+          sorunlar.push({ satir: satirNo, kod, ad: "—", sebep: "Stok adı boş" });
+          return;
+        }
+        // (b) Gerçek çakışma: aynı kod farklı ürünlere verilmiş.
+        // Bilerek aktarmıyoruz. "Son satır kazansın" deseydik hangi ürünün
+        // kazandığı Excel'deki sıraya kalırdı ve bunu asla fark etmezdin.
+        if ((kodImzalari.get(kod)?.size ?? 0) > 1) {
+          sorunlar.push({
+            satir: satirNo,
+            kod,
+            ad,
+            sebep: "Aynı stok kodu farklı ürünlerde kullanılmış",
+          });
+          return;
+        }
+
+        // (a) Masum tekrar: aynı satır ikinci kez geldi, sessizce atla.
+        if (eklenenKodlar.has(kod)) {
+          tekrarEden++;
+          return;
+        }
+        eklenenKodlar.add(kod);
+
+        gecerli.push({
+          stok_kodu: kod,
+          stok_adi: ad,
+          stok_adi_norm: normalizeName(ad),
+          stok_birim: cBirim ? cleanText(s[cBirim]) : null,
+          stok_grup: cGrup ? cleanText(s[cGrup]) : null,
+          son_alis_tarihi: cTarih ? normalizeDate(s[cTarih]) : null,
+          son_satici: cSatici ? cleanText(s[cSatici]) : null,
+        });
+      });
+
+      setOnizleme({
+        dosyaAdi: dosya.name,
+        toplamSatir: satirlar.length,
+        gecerli,
+        sorunlar,
+        tekrarEden,
+      });
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Dosya okunamadı.");
+    } finally {
+      setOkuma(false);
+    }
+  };
+
+  // ---- AŞAMA 2: Supabase'e aktar ---------------------------
+  const aktar = async () => {
+    if (!onizleme || onizleme.gecerli.length === 0) return;
+
+    setAktarim(true);
+    setHata(null);
+    setSonuc(null);
+    setIlerleme(0);
+
+    try {
+      const satirlar = onizleme.gecerli;
+      let gonderilen = 0;
+
+      for (let i = 0; i < satirlar.length; i += PAKET_BOYUTU) {
+        const paket = satirlar
+          .slice(i, i + PAKET_BOYUTU)
+          .map((r) => ({ ...r, updated_at: new Date().toISOString() }));
+
+        // upsert = "bu stok kodu varsa güncelle, yoksa ekle"
+        // Bu sayede ekranı istediğin kadar tekrar çalıştırabilirsin.
+        const { error } = await supabase
+          .from("master_products")
+          .upsert(paket, { onConflict: "stok_kodu" });
+
+        if (error) throw new Error(error.message);
+
+        gonderilen += paket.length;
+        setIlerleme(Math.round((gonderilen / satirlar.length) * 100));
+      }
+
+      setSonuc(`${gonderilen} ürün master_products tablosuna aktarıldı.`);
+    } catch (err) {
+      setHata(err instanceof Error ? err.message : "Aktarım sırasında hata oluştu.");
+    } finally {
+      setAktarim(false);
+    }
+  };
+
+  // Sorunları sebebe göre gruplayıp özet çıkaralım
+  const sorunOzeti = useMemo(() => {
+    if (!onizleme) return [];
+    const m = new Map<string, number>();
+    for (const s of onizleme.sorunlar) m.set(s.sebep, (m.get(s.sebep) ?? 0) + 1);
+    return [...m.entries()];
+  }, [onizleme]);
+
+  return (
+    <main className="min-h-screen bg-[#F7F8F6] text-[#0F1A14]">
+      <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6 sm:py-12">
+        {/* Başlık */}
+        <header className="mb-8">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+            Ana veri
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+            Stok kartlarını içeri al
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-[#5B6660]">
+            ElektraWeb&apos;den aldığın stok listesini yükle. Aktarmadan önce
+            dosyayı denetler, sorunlu satırları gösterir. Aynı dosyayı tekrar
+            yüklemek güvenlidir: mevcut kayıtlar güncellenir, mükerrer kayıt oluşmaz.
+          </p>
+        </header>
+
+        {/* Dosya seçimi */}
+        <section className="rounded-2xl border border-[#DDE3DC] bg-white p-5 sm:p-6">
+          <label
+            htmlFor="dosya"
+            className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-[#C6D0C6] bg-[#FAFBFA] px-4 py-10 text-center transition-colors hover:border-[#1F5C3D] hover:bg-[#F3F7F3] focus-within:ring-2 focus-within:ring-[#1F5C3D]"
+          >
+            {okuma ? (
+              <Loader2 className="h-7 w-7 animate-spin text-[#1F5C3D]" />
+            ) : (
+              <UploadCloud className="h-7 w-7 text-[#1F5C3D]" />
+            )}
+            <span className="text-sm font-medium">
+              {okuma ? "Dosya okunuyor…" : "Excel dosyası seç"}
+            </span>
+            <span className="text-xs text-[#5B6660]">.xlsx — ilk sayfa okunur</span>
+            <input
+              id="dosya"
+              ref={dosyaRef}
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={dosyaSecildi}
+              disabled={okuma || aktarim}
+              className="sr-only"
+            />
+          </label>
+        </section>
+
+        {/* Hata */}
+        {hata && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#E9C9C6] bg-[#FDF4F3] p-4">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-[#B3261E]" />
+            <p className="text-sm leading-relaxed text-[#7A1B15]">{hata}</p>
+          </div>
+        )}
+
+        {/* Önizleme */}
+        {onizleme && (
+          <section className="mt-4 overflow-hidden rounded-2xl border border-[#DDE3DC] bg-white">
+            <div className="flex items-center gap-2 border-b border-[#DDE3DC] px-5 py-4">
+              <FileSpreadsheet className="h-4 w-4 text-[#1F5C3D]" />
+              <span className="truncate text-sm font-medium">{onizleme.dosyaAdi}</span>
+            </div>
+
+            <div className="grid grid-cols-3 divide-x divide-[#DDE3DC] border-b border-[#DDE3DC]">
+              <Kutu etiket="Okunan satır" deger={onizleme.toplamSatir} />
+              <Kutu etiket="Aktarılacak" deger={onizleme.gecerli.length} vurgu="#1F5C3D" />
+              <Kutu
+                etiket="Sorunlu"
+                deger={onizleme.sorunlar.length}
+                vurgu={onizleme.sorunlar.length > 0 ? "#B3261E" : undefined}
+              />
+            </div>
+
+            {/* Birebir tekrar eden satır bilgisi */}
+            {onizleme.tekrarEden > 0 && (
+              <p className="border-b border-[#DDE3DC] px-5 py-3 text-xs leading-relaxed text-[#5B6660]">
+                {onizleme.tekrarEden} satır dosyada birebir tekrar ettiği için teke
+                indirildi. Bilgi kaybı yok.
+              </p>
+            )}
+
+            {/* Sorun listesi */}
+            {onizleme.sorunlar.length > 0 && (
+              <div className="border-b border-[#DDE3DC] px-5 py-4">
+                <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1">
+                  {sorunOzeti.map(([sebep, adet]) => (
+                    <span key={sebep} className="text-xs text-[#5B6660]">
+                      <span className="font-semibold text-[#B3261E]">{adet}</span> · {sebep}
+                    </span>
+                  ))}
+                </div>
+                <ul className="space-y-1.5">
+                  {onizleme.sorunlar.map((s, i) => (
+                    <li
+                      key={`${s.satir}-${i}`}
+                      className="flex gap-3 border-l-2 border-[#C9A227] py-1 pl-3 text-xs"
+                    >
+                      <span className="w-14 shrink-0 tabular-nums text-[#5B6660]">
+                        satır {s.satir}
+                      </span>
+                      <span className="w-20 shrink-0 font-mono tabular-nums">{s.kod}</span>
+                      <span className="min-w-0 flex-1 truncate">{s.ad}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-3 text-xs leading-relaxed text-[#5B6660]">
+                  Bu satırlar aktarılmayacak. Kaynağı ElektraWeb&apos;de düzeltip
+                  dosyayı tekrar yükle.
+                </p>
+              </div>
+            )}
+
+            {/* Aksiyon */}
+            <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                onClick={hepsiniSifirla}
+                disabled={aktarim}
+                className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-[#5B6660] transition-colors hover:bg-[#F0F3F0] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] disabled:opacity-40"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Başka dosya seç
+              </button>
+
+              <button
+                onClick={aktar}
+                disabled={aktarim || onizleme.gecerli.length === 0}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#1F5C3D] px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#184A31] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {aktarim && <Loader2 className="h-4 w-4 animate-spin" />}
+                {aktarim
+                  ? `Aktarılıyor… %${ilerleme}`
+                  : `${onizleme.gecerli.length} ürünü aktar`}
+              </button>
+            </div>
+
+            {/* İlerleme çubuğu */}
+            {aktarim && (
+              <div className="h-1 w-full bg-[#EDF0ED]">
+                <div
+                  className="h-full bg-[#C9A227] transition-[width] duration-300 motion-reduce:transition-none"
+                  style={{ width: `${ilerleme}%` }}
+                />
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Başarı */}
+        {sonuc && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#C3DCC9] bg-[#F2F8F3] p-4">
+            <CheckCircle2 className="h-5 w-5 shrink-0 text-[#1F5C3D]" />
+            <p className="text-sm leading-relaxed text-[#1F5C3D]">{sonuc}</p>
+          </div>
+        )}
+      </div>
+    </main>
+  );
+}
+
+// Küçük sayı kutusu
+function Kutu({
+  etiket,
+  deger,
+  vurgu,
+}: {
+  etiket: string;
+  deger: number;
+  vurgu?: string;
+}) {
+  return (
+    <div className="px-4 py-4 text-center sm:px-5">
+      <div
+        className="text-xl font-semibold tabular-nums sm:text-2xl"
+        style={vurgu ? { color: vurgu } : undefined}
+      >
+        {deger}
+      </div>
+      <div className="mt-0.5 text-[11px] uppercase tracking-wider text-[#5B6660]">
+        {etiket}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/app/tedarikciler/page.tsx">
+// ============================================================
+//  src/app/tedarikciler/page.tsx
+//  Tedarikçi listesi ve ekleme
+// ============================================================
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { AlertTriangle, ArrowLeft, Loader2, Plus, Users } from "lucide-react";
+import { supabase } from "@/lib/supabase";
+
+type Tedarikci = {
+  id: string;
+  name: string;
+  contact_info: string | null;
+  created_at: string;
+};
+
+export default function TedarikcilerPage() {
+  const [liste, setListe] = useState<Tedarikci[]>([]);
+  const [yukleniyor, setYukleniyor] = useState(true);
+  const [ad, setAd] = useState("");
+  const [iletisim, setIletisim] = useState("");
+  const [kaydediyor, setKaydediyor] = useState(false);
+  const [hata, setHata] = useState<string | null>(null);
+
+  // DİKKAT: Bu fonksiyonun içinde ilk await'ten ÖNCE setState çağırmıyoruz.
+  // yukleniyor state'ini zaten true başlattığımız için buna gerek yok.
+  // Effect içinden senkron setState çağırmak React'te çift render'a yol açar
+  // (react-hooks/set-state-in-effect kuralı bunu yakalar).
+  const getir = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("suppliers")
+      .select("id, name, contact_info, created_at")
+      .order("name");
+    if (error) setHata(error.message);
+    else setListe(data ?? []);
+    setYukleniyor(false);
+  }, []);
+
+  useEffect(() => {
+    getir();
+  }, [getir]);
+
+  const ekle = async () => {
+    const temiz = ad.trim();
+    if (!temiz) return;
+
+    // Aynı firmayı iki kez eklemeyi engelliyoruz. Aksi halde aynı
+    // tedarikçinin listeleri iki ayrı kayda dağılır ve MIN hesabı
+    // eksik listelerle çalışır.
+    const mevcut = liste.find(
+      (t) => t.name.trim().toLocaleLowerCase("tr") === temiz.toLocaleLowerCase("tr")
+    );
+    if (mevcut) {
+      setHata(`"${mevcut.name}" zaten kayıtlı.`);
+      return;
+    }
+
+    setKaydediyor(true);
+    setHata(null);
+    const { error } = await supabase
+      .from("suppliers")
+      .insert({ name: temiz, contact_info: iletisim.trim() || null });
+
+    if (error) setHata(error.message);
+    else {
+      setAd("");
+      setIletisim("");
+      await getir();
+    }
+    setKaydediyor(false);
+  };
+
+  return (
+    <main className="min-h-screen bg-[#F7F8F6] text-[#0F1A14]">
+      <div className="mx-auto w-full max-w-2xl px-4 py-8 sm:px-6 sm:py-12">
+        <Link
+          href="/"
+          className="mb-6 inline-flex items-center gap-1.5 text-sm text-[#5B6660] transition-colors hover:text-[#1F5C3D]"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Ana sayfa
+        </Link>
+
+        <header className="mb-8">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+            Adım 2
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+            Tedarikçiler
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-[#5B6660]">
+            Fiyat listesi ve fatura yükleyeceğin firmalar. Firma adını
+            ElektraWeb&apos;de göründüğü gibi yazman, ileride karışıklığı önler.
+          </p>
+        </header>
+
+        {/* Ekleme formu */}
+        <section className="rounded-2xl border border-[#DDE3DC] bg-white p-5 sm:p-6">
+          <div className="space-y-3">
+            <div>
+              <label htmlFor="ad" className="mb-1.5 block text-sm font-medium">
+                Firma adı
+              </label>
+              <input
+                id="ad"
+                value={ad}
+                onChange={(e) => setAd(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") ekle();
+                }}
+                placeholder="MİRAÇ SERACILIK TARIM ÜRÜNLERİ TİC. LTD.ŞTİ."
+                className="w-full rounded-lg border border-[#DDE3DC] px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-[#B4BDB6] focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="iletisim" className="mb-1.5 block text-sm font-medium">
+                İletişim <span className="font-normal text-[#5B6660]">(isteğe bağlı)</span>
+              </label>
+              <input
+                id="iletisim"
+                value={iletisim}
+                onChange={(e) => setIletisim(e.target.value)}
+                placeholder="Yetkili, telefon veya e-posta"
+                className="w-full rounded-lg border border-[#DDE3DC] px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-[#B4BDB6] focus:border-[#1F5C3D] focus:ring-2 focus:ring-[#1F5C3D]/15"
+              />
+            </div>
+
+            <button
+              onClick={ekle}
+              disabled={kaydediyor || ad.trim() === ""}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[#1F5C3D] px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#184A31] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+            >
+              {kaydediyor ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
+              Tedarikçi ekle
+            </button>
+          </div>
+        </section>
+
+        {hata && (
+          <div className="mt-4 flex gap-3 rounded-xl border border-[#E9C9C6] bg-[#FDF4F3] p-4">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-[#B3261E]" />
+            <p className="text-sm leading-relaxed text-[#7A1B15]">{hata}</p>
+          </div>
+        )}
+
+        {/* Kayıtlı tedarikçiler */}
+        <section className="mt-8">
+          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+            Kayıtlı tedarikçiler {liste.length > 0 && `(${liste.length})`}
+          </h2>
+
+          {yukleniyor ? (
+            <div className="flex items-center gap-2 rounded-xl border border-[#DDE3DC] bg-white px-5 py-6 text-sm text-[#5B6660]">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Yükleniyor…
+            </div>
+          ) : liste.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-[#DDE3DC] px-5 py-8 text-center">
+              <Users className="mx-auto h-5 w-5 text-[#B4BDB6]" />
+              <p className="mt-2 text-sm text-[#5B6660]">
+                Henüz tedarikçi yok. Yukarıdan ilkini ekle.
+              </p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-[#DDE3DC] overflow-hidden rounded-xl border border-[#DDE3DC] bg-white">
+              {liste.map((t) => (
+                <li key={t.id} className="px-5 py-4">
+                  <p className="text-sm font-medium">{t.name}</p>
+                  {t.contact_info && (
+                    <p className="mt-0.5 text-xs text-[#5B6660]">{t.contact_info}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+    </main>
+  );
+}
+</file>
+
+<file path="src/app/tesellum/page.tsx">
+"use client";
+
+import { useState, ChangeEvent } from "react";
+import { Upload, FileText, AlertCircle, ArrowUpRight } from "lucide-react";
+
+// API'den gelecek verinin şablonunu (Interface) kesin ve net bir şekilde tanımlıyoruz
+interface ZamliUrun {
+  stokAdi: string;
+  oncekiFiyat: number;
+  alisFiyati: number;
+  farkTl: number;
+  farkYuzde: number;
+}
+
+export default function TesellumAnaliz() {
+  const [file, setFile] = useState<File | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState<ZamliUrun[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      setFile(e.target.files[0]);
+      setError(null);
+      setResults([]); // Yeni dosya seçildiğinde eski sonuçları temizle
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!file) {
+      setError("Lütfen önce bir PDF tesellüm fişi seçin.");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    // Dosyayı API'ye göndermek için FormData kullanıyoruz
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const response = await fetch("/api/read-pdf", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Sunucu hatası oluştu.");
+      }
+
+      // Gelen veriyi (data.data) listeye aktarıyoruz
+      setResults(data.data as ZamliUrun[]);
+
+      if (data.data.length === 0) {
+        setError("Bu fişte fiyatı artan (zamlı) hiçbir ürün bulunamadı.");
+      }
+
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError("Analiz sırasında hata: " + errorMessage);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Para ve Yüzde formatlayıcı yardımcı fonksiyonlar
+  const formatCurrency = (value: number) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(value);
+  const formatPercent = (value: number) => `%${value.toFixed(2)}`;
+
+  return (
+    <main className="min-h-screen bg-slate-50 p-8">
+      <div className="max-w-6xl mx-auto space-y-8">
+
+        {/* Üst Kısım: Yükleme Alanı */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8">
+          <div className="mb-6">
+            <h1 className="text-2xl font-bold text-slate-800">Tesellüm Fişi Zam Analizi</h1>
+            <p className="text-slate-500 mt-1">Sistemden aldığınız PDF fişini yükleyin, fiyatı artan ürünleri anında tespit edelim.</p>
+          </div>
+
+          <div className="flex flex-col md:flex-row gap-4 items-start md:items-center">
+            <div className="flex-1 w-full border-2 border-dashed border-slate-300 rounded-lg p-6 flex flex-col items-center justify-center bg-slate-50 hover:bg-slate-100 transition">
+              <FileText className="w-10 h-10 text-rose-500 mb-3" />
+              <input
+                type="file"
+                accept="application/pdf"
+                onChange={handleFileChange}
+                className="block w-full text-sm text-slate-500
+                  file:mr-4 file:py-2 file:px-4
+                  file:rounded-full file:border-0
+                  file:text-sm file:font-semibold
+                  file:bg-rose-50 file:text-rose-700
+                  hover:file:bg-rose-100 cursor-pointer text-center"
+              />
+            </div>
+
+            <button
+              onClick={handleUpload}
+              disabled={!file || loading}
+              className={`w-full md:w-auto flex items-center justify-center gap-2 py-4 px-8 rounded-lg text-white font-medium transition h-full min-h-[140px]
+                ${(!file || loading) ? "bg-slate-400 cursor-not-allowed" : "bg-rose-600 hover:bg-rose-700"}`}
+            >
+              {loading ? (
+                <span className="animate-pulse">Analiz Ediliyor...</span>
+              ) : (
+                <div className="flex flex-col items-center gap-2">
+                  <Upload className="w-6 h-6" />
+                  <span>Fişi Analiz Et</span>
+                </div>
+              )}
+            </button>
+          </div>
+
+          {error && (
+            <div className="mt-4 p-4 rounded-lg flex items-center gap-3 bg-red-50 text-red-800 border border-red-200">
+              <AlertCircle className="w-5 h-5" />
+              <p>{error}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Alt Kısım: Sonuç Tablosu */}
+        {results.length > 0 && (
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 text-amber-500" />
+                Zam Tespit Edilen Ürünler ({results.length})
+              </h2>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm text-slate-600">
+                <thead className="bg-slate-100 text-slate-700 font-medium">
+                  <tr>
+                    <th className="px-6 py-4">Stok Adı</th>
+                    <th className="px-6 py-4 text-right">Önceki Fiyat</th>
+                    <th className="px-6 py-4 text-right">Yeni Alış Fiyatı</th>
+                    <th className="px-6 py-4 text-right">Fark (TL)</th>
+                    <th className="px-6 py-4 text-right">Zam Oranı (%)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {results.map((urun, index) => (
+                    <tr key={index} className="hover:bg-slate-50 transition">
+                      <td className="px-6 py-4 font-medium text-slate-800">{urun.stokAdi}</td>
+                      <td className="px-6 py-4 text-right">{formatCurrency(urun.oncekiFiyat)}</td>
+                      <td className="px-6 py-4 text-right font-medium">{formatCurrency(urun.alisFiyati)}</td>
+                      <td className="px-6 py-4 text-right text-rose-600 font-medium">
+                        +{formatCurrency(urun.farkTl)}
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-100 text-rose-700 font-semibold text-xs">
+                          <ArrowUpRight className="w-3 h-3" />
+                          {formatPercent(urun.farkYuzde)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </main>
+  );
+}
+</file>
+
+<file path="src/lib/exportRapor.ts">
+// ============================================================
+//  src/lib/exportRapor.ts
+//  Denetim sonucunu Excel raporuna çevirir (tarayıcıda, sunucu yok)
+// ============================================================
+import * as XLSX from "xlsx";
+import type { DenetimSatiri } from "./matchEngine";
+
+const DURUM_ETIKET: Record<string, string> = {
+  fark_var: "ALEYHE FARK",
+  belirsiz_fark_kesin: "ALEYHE (ÇEŞİT BELİRSİZ, ALT SINIR)",
+  uygun: "Uygun",
+  lehe_fark: "Lehte / önemsiz",
+  belirsiz_cesit: "Çeşit belirsiz — karar bekliyor",
+  listede_yok: "Listede yok",
+  fiyat_verilmemis: "Fiyat verilmemiş",
+  birim_uyusmazligi: "Birim uyuşmazlığı",
+  eslesmedi: "Master ürün bulunamadı",
+};
+
+export function raporIndir(params: {
+  dosyaAdi: string;
+  faturaDosya: string;
+  faturaTarihi: string;
+  tedarikci: string;
+  listeEtiketleri: string[];
+  satirlar: DenetimSatiri[];
+}) {
+  const { dosyaAdi, faturaDosya, faturaTarihi, tedarikci, listeEtiketleri, satirlar } = params;
+
+  const aleyheSatirlar = satirlar.filter(
+    (s) => s.durum === "fark_var" || s.durum === "belirsiz_fark_kesin"
+  );
+  const toplamFark = aleyheSatirlar.reduce((t, s) => t + (s.fark_toplam ?? 0), 0);
+
+  // --- Sayfa 1: Özet ---
+  const ozet = [
+    ["Fiyat Farkı Denetim Raporu"],
+    [],
+    ["Tedarikçi", tedarikci],
+    ["Fatura", faturaDosya],
+    ["Fatura tarihi", faturaTarihi],
+    ["Baz alınan liste(ler)", listeEtiketleri.join(", ")],
+    ["Rapor tarihi", new Date().toLocaleString("tr-TR")],
+    [],
+    ["Toplam satır", satirlar.length],
+    ["Aleyhe fark bulunan (kesin)", satirlar.filter((s) => s.durum === "fark_var").length],
+    [
+      "Aleyhe fark (çeşit belirsiz, alt sınır)",
+      satirlar.filter((s) => s.durum === "belirsiz_fark_kesin").length,
+    ],
+    ["Karar bekleyen (çeşit belirsiz)", satirlar.filter((s) => s.durum === "belirsiz_cesit").length],
+    ["Listede olmayan", satirlar.filter((s) => s.durum === "listede_yok").length],
+    ["Birim uyuşmazlığı", satirlar.filter((s) => s.durum === "birim_uyusmazligi").length],
+    [],
+    ["TOPLAM İADE TALEBİ (TL)", Number(toplamFark.toFixed(2))],
+  ];
+  const wsOzet = XLSX.utils.aoa_to_sheet(ozet);
+  wsOzet["!cols"] = [{ wch: 32 }, { wch: 40 }];
+
+  // --- Sayfa 2: İade talebine giren satırlar ---
+  const iadeBaslik = [
+    "Ürün",
+    "Miktar",
+    "Fatura Fiyatı",
+    "Baz Fiyat",
+    "Baz Ürün",
+    "Birim Fark",
+    "Toplam Fark (TL)",
+    "Durum",
+  ];
+  const iadeSatirlari = aleyheSatirlar.map((s) => [
+    s.urun_adi,
+    s.miktar,
+    s.fatura_fiyati,
+    s.baz_fiyat ?? `≤ ${s.aday_max}`,
+    s.baz_urun_adi ?? `(${s.aday_sayisi} çeşit arasından en pahalısı)`,
+    s.fark_birim,
+    Number((s.fark_toplam ?? 0).toFixed(2)),
+    DURUM_ETIKET[s.durum] ?? s.durum,
+  ]);
+  const wsIade = XLSX.utils.aoa_to_sheet([iadeBaslik, ...iadeSatirlari]);
+  wsIade["!cols"] = [
+    { wch: 22 }, { wch: 9 }, { wch: 12 }, { wch: 12 },
+    { wch: 26 }, { wch: 11 }, { wch: 14 }, { wch: 28 },
+  ];
+
+  // --- Sayfa 3: Tüm satırlar (denetim izi) ---
+  const tumBaslik = [
+    "Ürün", "Miktar", "Fatura Fiyatı", "Fatura Birim",
+    "Durum", "Baz Fiyat", "Baz Ürün", "Aday Sayısı",
+    "Aday Min", "Aday Max", "Toplam Fark", "Seçim",
+  ];
+  const tumSatirlar = satirlar.map((s) => [
+    s.urun_adi, s.miktar, s.fatura_fiyati, s.fatura_birim_norm,
+    DURUM_ETIKET[s.durum] ?? s.durum, s.baz_fiyat, s.baz_urun_adi,
+    s.aday_sayisi, s.aday_min, s.aday_max,
+    s.fark_toplam !== null ? Number(s.fark_toplam.toFixed(2)) : null,
+    s.secim_tipi === "manuel" ? "Manuel" : "Otomatik",
+  ]);
+  const wsTum = XLSX.utils.aoa_to_sheet([tumBaslik, ...tumSatirlar]);
+  wsTum["!cols"] = [
+    { wch: 22 }, { wch: 8 }, { wch: 12 }, { wch: 10 },
+    { wch: 28 }, { wch: 10 }, { wch: 24 }, { wch: 10 },
+    { wch: 9 }, { wch: 9 }, { wch: 12 }, { wch: 10 },
+  ];
+
+  // --- Sayfa 4: Listede hiç olmayanlar (tedarikçiye sorulacak) ---
+  const yokSatirlar = satirlar
+    .filter((s) => s.durum === "listede_yok")
+    .map((s) => [s.urun_adi, s.miktar, s.fatura_fiyati]);
+  const wsYok = XLSX.utils.aoa_to_sheet([
+    ["Bu kalemler fiyat listesinde bulunamadı — tedarikçiden güncel liste isteyin"],
+    [],
+    ["Ürün", "Miktar", "Fatura Fiyatı"],
+    ...yokSatirlar,
+  ]);
+  wsYok["!cols"] = [{ wch: 24 }, { wch: 9 }, { wch: 12 }];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsOzet, "Özet");
+  XLSX.utils.book_append_sheet(wb, wsIade, "İade Talebi");
+  XLSX.utils.book_append_sheet(wb, wsTum, "Tüm Satırlar");
+  XLSX.utils.book_append_sheet(wb, wsYok, "Listede Yok");
+
+  XLSX.writeFile(wb, dosyaAdi);
+}
+</file>
+
+<file path="src/lib/matchEngine.ts">
+// ============================================================
+//  src/lib/matchEngine.ts
+//  Fatura satırı ile fiyat listesi kalemlerini eşleştirip
+//  denetim sonucunu (durum, fark) hesaplayan saf mantık.
+//
+//  Miraç'ın 11.08.2026 faturası + Liste B ile test edildi:
+//    fark_var 6, belirsiz_fark_kesin 2, belirsiz_cesit 4,
+//    uygun 4, lehe_fark 4, listede_yok 12   (toplam 32)
+//    Garanti aleyhe alt sınır: 3.475 TL
+// ============================================================
+
+export type Durum =
+  | "uygun"
+  | "fark_var"
+  | "lehe_fark"
+  | "belirsiz_fark_kesin"
+  | "belirsiz_cesit"
+  | "listede_yok"
+  | "fiyat_verilmemis"
+  | "birim_uyusmazligi"
+  | "eslesmedi";
+
+export type EslesmeAdayi = {
+  price_list_item_id: string;
+  urun_adi: string;
+  birim_norm: string | null;
+  birim_fiyat: number | null;
+};
+
+export type DenetimSatiri = {
+  invoice_item_id: string;
+  urun_adi: string;
+  miktar: number;
+  fatura_fiyati: number;
+  fatura_birim_norm: string | null;
+
+  durum: Durum;
+  secim_tipi: "otomatik" | "manuel";
+  price_list_item_id: string | null;
+  baz_urun_adi: string | null;
+  baz_fiyat: number | null;
+  fark_birim: number | null;
+  fark_toplam: number | null;
+  aday_sayisi: number;
+  aday_min: number | null;
+  aday_max: number | null;
+  adaylar: EslesmeAdayi[]; // belirsiz_cesit durumunda ekranda göstermek için
+};
+
+// 1 kuruşluk fark "fark yok" sayılır — kayan nokta yuvarlamasından
+// veya senin kuralın olan "kuruş seviyesindeki farkları yok say"dan.
+const EPSILON = 0.01;
+
+function tokenize(norm: string): string[] {
+  return norm.split(" ").filter(Boolean);
+}
+
+/** Fatura ürününün her kelimesi, liste ürününün kelimelerinde geçiyor mu? */
+function altKumeUyumu(faturaTok: string[], listeTok: string[]): boolean {
+  const set = new Set(listeTok);
+  return faturaTok.every((w) => set.has(w));
+}
+
+/**
+ * Bir fatura satırına, verilen fiyat listesi havuzu içinden aday(lar) bulur.
+ * Sıra: (1) alias ile öğretilmiş kesin bağ, (2) birebir isim eşleşmesi,
+ * (3) kelime alt kümesi ("DOMATES" -> "DOMATES SALKIM" gibi çeşit uzantıları).
+ * Kelime KÜMESİ kullandığımız için "BİBER SİVRİ" ile "SİVRİ BİBER" gibi
+ * ters sıralı yazımlar da otomatik yakalanır — bu kasıtlı bir fayda.
+ */
+export function adaylariBul(
+  faturaUrunNorm: string,
+  aliasNormlari: Set<string>, // bu master ürün için öğretilmiş liste-isim normları
+  havuz: EslesmeAdayi[],
+  havuzNormlari: Map<string, string> // price_list_item_id -> urun_adi_norm
+): { adaylar: EslesmeAdayi[]; tip: "alias" | "birebir" | "cesit" | "yok" } {
+  const aliasHit = havuz.filter((p) => {
+    const n = havuzNormlari.get(p.price_list_item_id);
+    return n && aliasNormlari.has(n);
+  });
+  if (aliasHit.length > 0) return { adaylar: aliasHit, tip: "alias" };
+
+  const birebir = havuz.filter((p) => havuzNormlari.get(p.price_list_item_id) === faturaUrunNorm);
+  if (birebir.length > 0) return { adaylar: birebir, tip: "birebir" };
+
+  const faturaTok = tokenize(faturaUrunNorm);
+  const cesit = havuz.filter((p) => {
+    const n = havuzNormlari.get(p.price_list_item_id);
+    return n && altKumeUyumu(faturaTok, tokenize(n));
+  });
+  if (cesit.length > 0) return { adaylar: cesit, tip: "cesit" };
+
+  return { adaylar: [], tip: "yok" };
+}
+
+/**
+ * Adaylardan denetim sonucunu (durum + fark) hesaplar.
+ *
+ * ÖNEMLİ KURAL (Volkan'ın politikası): sadece ALEYHE farklar talep edilir.
+ * Fatura fiyatı adayların hepsinden düşükse (lehte), hangi çeşit
+ * olduğu önemli değildir — talep edilmez.
+ *
+ * Fatura fiyatı adayların HEPSİNDEN yüksekse, hangi çeşit gelmiş
+ * olursa olsun fark kesindir. Bu durumda Volkan'ın kararını
+ * beklemeden garanti bir ALT SINIR hesaplanır (en pahalı adaya göre).
+ */
+export function degerlendir(
+  satir: Omit<
+    DenetimSatiri,
+    | "durum"
+    | "secim_tipi"
+    | "price_list_item_id"
+    | "baz_urun_adi"
+    | "baz_fiyat"
+    | "fark_birim"
+    | "fark_toplam"
+    | "aday_sayisi"
+    | "aday_min"
+    | "aday_max"
+    | "adaylar"
+  >,
+  adaylar: EslesmeAdayi[]
+): DenetimSatiri {
+  const taban = { ...satir, secim_tipi: "otomatik" as const, adaylar };
+
+  if (adaylar.length === 0) {
+    return {
+      ...taban,
+      durum: "listede_yok",
+      price_list_item_id: null,
+      baz_urun_adi: null,
+      baz_fiyat: null,
+      fark_birim: null,
+      fark_toplam: null,
+      aday_sayisi: 0,
+      aday_min: null,
+      aday_max: null,
+    };
+  }
+
+  const fiyatli = adaylar.filter((a) => a.birim_fiyat !== null);
+
+  if (fiyatli.length === 0) {
+    return {
+      ...taban,
+      durum: "fiyat_verilmemis",
+      price_list_item_id: null,
+      baz_urun_adi: null,
+      baz_fiyat: null,
+      fark_birim: null,
+      fark_toplam: null,
+      aday_sayisi: adaylar.length,
+      aday_min: null,
+      aday_max: null,
+    };
+  }
+
+  // Tek fiyatlı aday: birim kontrolü + doğrudan kıyas
+  if (fiyatli.length === 1) {
+    const aday = fiyatli[0];
+    if (
+      satir.fatura_birim_norm &&
+      aday.birim_norm &&
+      satir.fatura_birim_norm !== aday.birim_norm
+    ) {
+      return {
+        ...taban,
+        durum: "birim_uyusmazligi",
+        price_list_item_id: aday.price_list_item_id,
+        baz_urun_adi: aday.urun_adi,
+        baz_fiyat: aday.birim_fiyat,
+        fark_birim: null,
+        fark_toplam: null,
+        aday_sayisi: 1,
+        aday_min: aday.birim_fiyat,
+        aday_max: aday.birim_fiyat,
+      };
+    }
+
+    const baz = aday.birim_fiyat as number;
+    const farkBirim = satir.fatura_fiyati - baz;
+    const durum: Durum =
+      Math.abs(farkBirim) <= EPSILON ? "uygun" : farkBirim > 0 ? "fark_var" : "lehe_fark";
+
+    return {
+      ...taban,
+      durum,
+      price_list_item_id: aday.price_list_item_id,
+      baz_urun_adi: aday.urun_adi,
+      baz_fiyat: baz,
+      fark_birim: durum === "uygun" ? 0 : farkBirim,
+      fark_toplam: durum === "uygun" ? 0 : farkBirim * satir.miktar,
+      aday_sayisi: 1,
+      aday_min: baz,
+      aday_max: baz,
+    };
+  }
+
+  // Birden fazla fiyatlı aday: çeşit belirsiz
+  const fiyatlar = fiyatli.map((a) => a.birim_fiyat as number);
+  const adayMin = Math.min(...fiyatlar);
+  const adayMax = Math.max(...fiyatlar);
+
+  if (satir.fatura_fiyati > adayMax + EPSILON) {
+    // Her ihtimalde aleyhe — garanti alt sınır en pahalı adaya göre.
+    const farkBirim = satir.fatura_fiyati - adayMax;
+    return {
+      ...taban,
+      durum: "belirsiz_fark_kesin",
+      price_list_item_id: null,
+      baz_urun_adi: null,
+      baz_fiyat: null,
+      fark_birim: farkBirim,
+      fark_toplam: farkBirim * satir.miktar,
+      aday_sayisi: adaylar.length,
+      aday_min: adayMin,
+      aday_max: adayMax,
+    };
+  }
+
+  if (satir.fatura_fiyati <= adayMin + EPSILON) {
+    // Her ihtimalde lehte veya eşit — talep edilmez.
+    return {
+      ...taban,
+      durum: "lehe_fark",
+      price_list_item_id: null,
+      baz_urun_adi: null,
+      baz_fiyat: null,
+      fark_birim: null,
+      fark_toplam: null,
+      aday_sayisi: adaylar.length,
+      aday_min: adayMin,
+      aday_max: adayMax,
+    };
+  }
+
+  // Gerçekten belirsiz: Volkan'ın kararı lazım.
+  return {
+    ...taban,
+    durum: "belirsiz_cesit",
+    price_list_item_id: null,
+    baz_urun_adi: null,
+    baz_fiyat: null,
+    fark_birim: null,
+    fark_toplam: null,
+    aday_sayisi: adaylar.length,
+    aday_min: adayMin,
+    aday_max: adayMax,
+  };
+}
+
+/** Manuel seçim sonrası satırı yeniden hesaplar (tek adaymış gibi). */
+export function manuelSecimUygula(
+  satir: DenetimSatiri,
+  secilenAday: EslesmeAdayi
+): DenetimSatiri {
+  const baz = secilenAday.birim_fiyat;
+  if (baz === null) {
+    return {
+      ...satir,
+      durum: "fiyat_verilmemis",
+      secim_tipi: "manuel",
+      price_list_item_id: secilenAday.price_list_item_id,
+      baz_urun_adi: secilenAday.urun_adi,
+      baz_fiyat: null,
+      fark_birim: null,
+      fark_toplam: null,
+    };
+  }
+
+  const farkBirim = satir.fatura_fiyati - baz;
+  const durum: Durum =
+    Math.abs(farkBirim) <= EPSILON ? "uygun" : farkBirim > 0 ? "fark_var" : "lehe_fark";
+
+  return {
+    ...satir,
+    durum,
+    secim_tipi: "manuel",
+    price_list_item_id: secilenAday.price_list_item_id,
+    baz_urun_adi: secilenAday.urun_adi,
+    baz_fiyat: baz,
+    fark_birim: durum === "uygun" ? 0 : farkBirim,
+    fark_toplam: durum === "uygun" ? 0 : farkBirim * satir.miktar,
+  };
+}
+</file>
+
+<file path="src/lib/normalize.ts">
+// ============================================================
+//  src/lib/normalize.ts
+//  Veri temizleme yardımcıları.
+//  Bu dosya projenin en kritik dosyalarından biri: fatura ile
+//  fiyat listesinin eşleşip eşleşmemesi buradaki kurallara bağlı.
+// ============================================================
+
+/**
+ * Excel'den gelen stok kodunu güvenli metne çevirir.
+ *
+ * SORUN: Excel "102.0050" kodunu ekranda öyle gösterir ama içeride
+ * 102.005 SAYISI olarak saklar. Sondaki sıfırın matematiksel anlamı
+ * olmadığı için atılır. Kodu doğrudan metne çevirirsek 88 ürünün
+ * kodu bozulur ve eşleştirme sessizce çalışmaz.
+ *
+ * ÇÖZÜM: Sayıysa her zaman 4 ondalıklı sabit formata zorla.
+ *   102.005  -> "102.0050"
+ *   120.04   -> "120.0400"
+ */
+export function normalizeStockCode(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value.toFixed(4) : null;
+  }
+
+  // Bazı export'larda kod zaten metin gelir. Virgüllü ondalık da olabilir.
+  const raw = String(value).trim().replace(",", ".");
+  if (raw === "") return null;
+
+  // Saf sayısal bir kodsa yine 4 ondalığa sabitle.
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    return Number(raw).toFixed(4);
+  }
+
+  // Sayısal değilse (ör. "HZM-01") olduğu gibi bırak.
+  return raw;
+}
+
+// Türkçe harflerin ASCII karşılıkları.
+// Dikkat: hem "İ" hem "I" hem "ı" -> "i" oluyor. Bu kasıtlı.
+// Amacımız dilbilgisel doğruluk değil, iki metnin aynı ürünü
+// gösterip göstermediğini anlamak.
+const TR_TO_ASCII: Record<string, string> = {
+  İ: "i", I: "i", ı: "i", i: "i",
+  Ş: "s", ş: "s",
+  Ğ: "g", ğ: "g",
+  Ü: "u", ü: "u",
+  Ö: "o", ö: "o",
+  Ç: "c", ç: "c",
+  Â: "a", â: "a",
+  Î: "i", î: "i",
+  Û: "u", û: "u",
+};
+
+/**
+ * Ürün ismini eşleştirmeye uygun kanonik forma indirger.
+ *
+ *   "BİBER  DOLMALIK"        -> "biber dolmalik"
+ *   "Domates Salkım 1.Kalite" -> "domates salkim 1 kalite"
+ *   " s. domates "            -> "s domates"
+ *
+ * NOT: Bu işi bilerek veritabanında (SQL) değil uygulamada yapıyoruz.
+ * PostgreSQL'in upper()/lower() fonksiyonları sunucunun dil ayarına
+ * göre Türkçe i/İ ve ı/I harflerinde farklı davranabilir. Uygulamada
+ * yapınca sonuç her ortamda birebir aynı olur.
+ */
+export function normalizeName(value: unknown): string {
+  if (value === null || value === undefined) return "";
+
+  let s = String(value);
+
+  // 1) Türkçe harfleri ASCII'ye indir
+  s = s.replace(/[İIıiŞşĞğÜüÖöÇçÂâÎîÛû]/g, (ch) => TR_TO_ASCII[ch] ?? ch);
+
+  // 2) Küçük harfe çevir (artık ASCII olduğu için güvenli)
+  s = s.toLowerCase();
+
+  // 3) Harf ve rakam dışındaki her şeyi boşluğa çevir
+  s = s.replace(/[^a-z0-9]+/g, " ");
+
+  // 4) Baştaki/sondaki boşlukları at, aradakileri teke indir
+  return s.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Excel'in tarih sıra numarasını (serial) gerçek tarihe çevirir.
+ * Excel, tarihleri 30 Aralık 1899'dan itibaren geçen gün sayısı olarak saklar.
+ * Örnek: 46245 -> 11.08.2026
+ */
+function excelSerialToUTC(serial: number): Date | null {
+  if (!Number.isFinite(serial)) return null;
+  const EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30);
+  const MS_PER_DAY = 86400000;
+  return new Date(EXCEL_EPOCH_UTC + Math.floor(serial) * MS_PER_DAY);
+}
+
+function formatUTC(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const g = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${g}`;
+}
+
+/**
+ * Tarihi Postgres DATE formatına (YYYY-MM-DD) çevirir.
+ *
+ * TEMEL KURAL: new Date(metin) ile TAHMİN ETTİRMİYORUZ.
+ * İki sebepten:
+ *   1) Excel'den sayı gelirse ("46245") JavaScript onu YIL sanır
+ *      ve 46245 yılını üretir. Postgres bunu reddeder.
+ *   2) Türkçe "11.08.2026" biçimini JavaScript Amerikan sanır ve
+ *      8 Kasım'a çevirir. Bu SESSİZ bir hatadır, kimse fark etmez.
+ *
+ * Tanıdığımız biçimler dışındaki her şey için null döneriz.
+ * Tarihsiz kayıt, yanlış tarihli kayıttan iyidir.
+ */
+export function normalizeDate(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+
+  let d: Date | null = null;
+
+  // 1) Zaten Date nesnesi (cellDates calistiysa)
+  if (value instanceof Date) {
+    d = isNaN(value.getTime()) ? null : value;
+  }
+  // 2) Excel sıra numarası (sayı olarak)
+  else if (typeof value === "number") {
+    d = excelSerialToUTC(value);
+  }
+  // 3) Metin
+  else {
+    const s = String(value).trim();
+
+    // 3a) Sadece rakam -> Excel sıra numarası
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      d = excelSerialToUTC(Number(s));
+    }
+    // 3b) ISO: 2026-08-11
+    else {
+      const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (iso) {
+        d = new Date(Date.UTC(+iso[1], +iso[2] - 1, +iso[3]));
+      } else {
+        // 3c) Türkçe gün-önce: 11.08.2026 / 11-08-2026 / 11/08/2026
+        //     Yıl 2 haneliyse (26) 2000'li varsayıyoruz.
+        const tr = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/);
+        if (tr) {
+          const gun = +tr[1];
+          const ay = +tr[2];
+          const yilRaw = +tr[3];
+          const yil = tr[3].length === 2 ? 2000 + yilRaw : yilRaw;
+          d = new Date(Date.UTC(yil, ay - 1, gun));
+        }
+      }
+    }
+  }
+
+  if (!d || isNaN(d.getTime())) return null;
+
+  // Akıl sağlığı kontrolü: bu uygulamada 1990-2100 dışı bir tarih
+  // her zaman okuma hatasıdır. Sessizce kabul etmiyoruz.
+  const yil = d.getUTCFullYear();
+  if (yil < 1990 || yil > 2100) return null;
+
+  return formatUTC(d);
+}
+
+/** Boş metinleri null'a çevirir. Veritabanında "" yerine NULL tutmak daha temizdir. */
+export function cleanText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s === "" ? null : s;
+}
+
+/**
+ * "Fatura_Mirac__11_08_26.xlsx" gibi bir dosya adından tarihi çıkarmaya
+ * çalışır. Yalnızca GÜN_AY_YIL veya GÜN.AY.YIL biçimini tanır — Excel
+ * sıra numarasıyla karışmasın diye ayrı bir fonksiyon.
+ * Tanıyamazsa null döner; TAHMİN ETMEZ.
+ */
+export function tarihFromDosyaAdi(dosyaAdi: string): string | null {
+  const temiz = dosyaAdi.replace(/\.[^.]+$/, ""); // uzantıyı at
+
+  // Önce ISO sıralı (YIL-AY-GÜN) dene — 4 haneli yıl her zaman öndedir,
+  // bu yüzden karışıklık riski yok. Bunu ATLARSAK, "2026-08-11" gibi bir
+  // dosya adı aşağıdaki gün-önce deseniyle "26-08-11" olarak yanlış
+  // eşleşip 2011 yılını üretebilir (bunu burada test ederken yakaladım).
+  const iso = temiz.match(/(\d{4})[._-](\d{1,2})[._-](\d{1,2})(?!\d)/);
+  if (iso) {
+    const yil = +iso[1];
+    const ay = +iso[2];
+    const gun = +iso[3];
+    if (ay >= 1 && ay <= 12 && gun >= 1 && gun <= 31) {
+      const d = new Date(Date.UTC(yil, ay - 1, gun));
+      if (d.getUTCDate() === gun && d.getUTCMonth() === ay - 1) {
+        return `${yil}-${String(ay).padStart(2, "0")}-${String(gun).padStart(2, "0")}`;
+      }
+    }
+  }
+
+  // Sonra Türkçe gün-önce (GÜN_AY_YIL) dene.
+  const m = temiz.match(/(\d{1,2})[._-](\d{1,2})[._-](\d{2}|\d{4})(?!\d)/);
+  if (!m) return null;
+  const gun = +m[1];
+  const ay = +m[2];
+  const yilRaw = +m[3];
+  const yil = m[3].length === 2 ? 2000 + yilRaw : yilRaw;
+  if (gun < 1 || gun > 31 || ay < 1 || ay > 12) return null;
+  const d = new Date(Date.UTC(yil, ay - 1, gun));
+  if (d.getUTCDate() !== gun || d.getUTCMonth() !== ay - 1) return null; // 31 Şubat gibi durumları ele
+  const yy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const gg = String(d.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${gg}`;
+}
+
+// Birim yazımları kaynaktan kaynağa değişiyor:
+//   Master liste : Kg  / Adet / Lt
+//   Miraç listesi: KG  / AD   / ADT / PAKET / PKT / BAĞ
+//   Fatura       : Kg  / Adet
+// Kıyaslama yapabilmek için hepsini tek bir kanonik forma indiriyoruz.
+const BIRIM_MAP: Record<string, string> = {
+  KG: "KG", KILO: "KG", KILOGRAM: "KG",
+  AD: "AD", ADT: "AD", ADET: "AD",
+  LT: "LT", L: "LT", LITRE: "LT",
+  PAKET: "PAKET", PKT: "PAKET", PK: "PAKET",
+  BAG: "BAG", DEMET: "BAG",
+  KUTU: "KUTU", KOLI: "KOLI", KASA: "KASA",
+};
+
+/**
+ * Birimi kanonik forma çevirir: "Adet" -> "AD", "PKT" -> "PAKET".
+ * Tanımadığı birimi büyük harfe çevirip aynen döndürür — uydurmaz.
+ * Böylece yeni bir birim çıktığında raporda görünür ve fark ederiz.
+ */
+export function normalizeUnit(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const k = normalizeName(value).replace(/\s+/g, "").toUpperCase();
+  if (k === "") return null;
+  return BIRIM_MAP[k] ?? k;
+}
+</file>
+
+<file path="src/lib/parseInvoice.ts">
+// ============================================================
+//  src/lib/parseInvoice.ts
+//  ElektraWeb fatura satırı export'unu okur.
+//
+//  Fatura_Mirac__11_08_26.xlsx ile test edildi: 32 satır,
+//  32'si de master_products ile birebir eşleşiyor.
+// ============================================================
+import * as XLSX from "xlsx";
+import { cleanText, normalizeName, normalizeUnit } from "./normalize";
+
+export type FaturaKalemi = {
+  satir_no: number;
+  stok_adi: string;
+  stok_adi_norm: string;
+  birim: string | null;
+  birim_norm: string | null;
+  miktar: number;
+  birim_fiyat: number;
+  satir_toplam: number | null;
+  kdv_orani: number | null;
+  vergi_dahil_toplam: number | null;
+  checksum_ok: boolean | null;
+};
+
+export type FaturaParseSonucu = {
+  kalemler: FaturaKalemi[];
+  atlananSatirlar: { satir: number; sebep: string }[];
+};
+
+function sayi(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const s = String(v).trim().replace(/[₺\s]/g, "").replace(",", ".");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+// ElektraWeb export'unda başlıklar sabit görünüyor ama tolere edelim.
+function basligiBul(basliklar: string[], adaylar: string[]): string | null {
+  const hedef = adaylar.map(normalizeName);
+  return basliklar.find((b) => hedef.includes(normalizeName(b))) ?? null;
+}
+
+export function parseInvoiceFile(buf: ArrayBuffer): FaturaParseSonucu {
+  const wb = XLSX.read(buf, { cellDates: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  if (!ws) throw new Error("Dosyanın ilk sayfası okunamadı.");
+
+  const satirlar = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
+    defval: null,
+  });
+  if (satirlar.length === 0) {
+    throw new Error("Dosyada veri satırı bulunamadı.");
+  }
+
+  const basliklar = Object.keys(satirlar[0]);
+  const cStok = basligiBul(basliklar, ["Stok", "Ürün", "Stok Adı"]);
+  const cBirim = basligiBul(basliklar, ["Birim"]);
+  const cMiktar = basligiBul(basliklar, ["Miktar"]);
+  // "Net Birim Fiyat" varsa onu, yoksa "Fiyat" sütununu kullan —
+  // faturada ikisi de aynı değeri taşıyordu, ikisini de aramamızın
+  // sebebi farklı export biçimlerine dayanıklı olmak.
+  const cFiyat = basligiBul(basliklar, ["Net Birim Fiyat", "Fiyat", "Birim Fiyat"]);
+  const cSatirToplam = basligiBul(basliklar, ["Satır Toplam"]);
+  const cKdv = basligiBul(basliklar, ["KDV %", "KDV Oranı"]);
+  const cVergiDahil = basligiBul(basliklar, ["Vergi Dahil Toplam"]);
+
+  if (!cStok || !cMiktar || !cFiyat) {
+    throw new Error(
+      `"Stok", "Miktar" ve fiyat sütunları bulunamadı. Dosyadaki başlıklar: ${basliklar.join(", ")}`
+    );
+  }
+
+  const kalemler: FaturaKalemi[] = [];
+  const atlananSatirlar: { satir: number; sebep: string }[] = [];
+
+  satirlar.forEach((s, i) => {
+    const satirNo = i + 2; // Excel'de 1. satır başlık
+    const ad = cleanText(s[cStok]);
+    const miktar = sayi(s[cMiktar]);
+    const fiyat = sayi(s[cFiyat]);
+
+    if (!ad) return; // boş satır, sessizce atla (ElektraWeb export'larında olağan)
+    if (miktar === null || miktar <= 0) {
+      atlananSatirlar.push({ satir: satirNo, sebep: "Miktar boş veya sıfır" });
+      return;
+    }
+    if (fiyat === null || fiyat < 0) {
+      atlananSatirlar.push({ satir: satirNo, sebep: "Birim fiyat okunamadı" });
+      return;
+    }
+
+    const satirToplam = cSatirToplam ? sayi(s[cSatirToplam]) : null;
+    const kdv = cKdv ? sayi(s[cKdv]) : null;
+    const vergiDahil = cVergiDahil ? sayi(s[cVergiDahil]) : null;
+
+    // Çapraz kontrol: Satır Toplam x (1+KDV) faturadaki Vergi Dahil
+    // Toplam'a yakın mı? Değilse bu satırı YANLIŞ OKUMUŞ olabiliriz —
+    // sessizce geçmek yerine işaretliyoruz. 1 kuruşluk yuvarlama payı
+    // bırakıyoruz.
+    let checksumOk: boolean | null = null;
+    if (satirToplam !== null && kdv !== null && vergiDahil !== null) {
+      const beklenen = satirToplam * (1 + kdv / 100);
+      checksumOk = Math.abs(beklenen - vergiDahil) < 0.05;
+    }
+
+    kalemler.push({
+      satir_no: satirNo,
+      stok_adi: ad,
+      stok_adi_norm: normalizeName(ad),
+      birim: cBirim ? cleanText(s[cBirim]) : null,
+      birim_norm: cBirim ? normalizeUnit(s[cBirim]) : null,
+      miktar,
+      birim_fiyat: fiyat,
+      satir_toplam: satirToplam,
+      kdv_orani: kdv,
+      vergi_dahil_toplam: vergiDahil,
+      checksum_ok: checksumOk,
+    });
+  });
+
+  return { kalemler, atlananSatirlar };
+}
+</file>
+
+<file path="src/lib/parsePriceList.ts">
+// ============================================================
+//  src/lib/parsePriceList.ts
+//  Tedarikçi fiyat listesi Excel'ini okur.
+//
+//  Miraç'ın Liste B dosyasıyla test edildi:
+//    158 kalem / 24 fiyatsız / 0 çakışan
+//    SEBZELER 57, MEYVELER 42, YEŞİLLİKLER 47, İTHAL 12
+// ============================================================
+import * as XLSX from "xlsx";
+import { normalizeName, normalizeUnit } from "./normalize";
+
+export type FiyatListesiKalemi = {
+  kategori: string | null;
+  sira_no: number | null;
+  urun_adi: string;
+  urun_adi_norm: string;
+  birim: string | null;
+  birim_norm: string | null;
+  birim_fiyat: number | null;
+};
+
+export type ListeParseSonucu = {
+  kalemler: FiyatListesiKalemi[];
+  fiyatsiz: string[];   // listede var ama fiyatı verilmemiş ürünler
+  cakisan: string[];    // aynı liste içinde ikinci kez geçen ürünler
+  dosyadakiTarih: string | null;
+};
+
+const bos = (c: unknown) =>
+  c === null || c === undefined || String(c).trim() === "";
+
+/**
+ * Fiyat hücresini sayıya çevirir.
+ *
+ * KRİTİK KURAL: Listede "0" veya "-" yazan ürün BEDAVA değildir,
+ * "bu hafta fiyat verilmedi" demektir. Sıfır olarak kaydedersek
+ * sistem faturadaki fiyatın tamamını "fazla" sanar ve tedarikçiye
+ * tamamen yanlış bir iade talebi gönderirsin.
+ */
+export function parsePrice(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  let s = String(value).trim();
+  if (s === "" || s === "-" || s === "—") return null;
+
+  // "₺1.500,00" -> 1500
+  s = s.replace(/[₺\sTLtl]/g, "");
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+
+  const n = Number(s);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Blok yapısını BAŞLIKTAN öğrenir, sütun numarası varsaymaz.
+ * "ÜRÜN" yazan her sütun bir blok başlatır; solundaki NO,
+ * sağındaki BİRİM ve FİYAT o bloğa aittir.
+ *
+ * Neden böyle: Liste B'de sayfada yan yana İKİ tablo var.
+ * Sabit sütun numarası yazsaydık, tedarikçi tabloyu bir sütun
+ * kaydırdığı gün parser sessizce boş sonuç dönerdi.
+ */
+function bloklariBul(row: unknown[]) {
+  const b: { no: number; urun: number; birim: number; fiyat: number }[] = [];
+  row.forEach((c, i) => {
+    if (normalizeName(c) === "urun") {
+      b.push({ no: i - 1, urun: i, birim: i + 1, fiyat: i + 2 });
+    }
+  });
+  return b;
+}
+
+export function parsePriceListFile(buf: ArrayBuffer): ListeParseSonucu {
+  const wb = XLSX.read(buf, { cellDates: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  if (!ws) throw new Error("Dosyanın ilk sayfası okunamadı.");
+
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, {
+    header: 1,
+    defval: null,
+    raw: true,
+    blankrows: true,
+  });
+
+  let bloklar: ReturnType<typeof bloklariBul> = [];
+  let kategori: string | null = null;
+  let baslikBulundu = false;
+
+  const ham: FiyatListesiKalemi[] = [];
+  const fiyatsiz: string[] = [];
+
+  // Dosyanın kendi içindeki tarih (Liste B'de "23.12.2024 - 29.12.2024").
+  // Bilgi olarak saklıyoruz ama HESAPTA KULLANMIYORUZ — tedarikçinin
+  // şablon başlığı aylarca güncellenmemiş olabiliyor.
+  let dosyadakiTarih: string | null = null;
+
+  rows.forEach((row, i) => {
+    if (!row || row.every(bos)) return;
+
+    if (i < 6 && dosyadakiTarih === null) {
+      for (const c of row) {
+        const s = String(c ?? "");
+        if (/\d{1,2}[./]\d{1,2}[./]\d{4}/.test(s)) {
+          dosyadakiTarih = s.trim();
+          break;
+        }
+      }
+    }
+
+    const bulunan = bloklariBul(row);
+    if (bulunan.length > 0) {
+      bloklar = bulunan;
+      baslikBulundu = true;
+      return; // başlık satırı, veri değil
+    }
+
+    const dolu = row.filter((c) => !bos(c));
+
+    // Kategori başlığı: tek dolu hücre, kısa metin, rakamla başlamıyor.
+    // Uzunluk sınırı, dosyanın en altındaki uzun uyarı notunu eler.
+    if (dolu.length === 1 && typeof dolu[0] === "string") {
+      const metin = (dolu[0] as string).trim();
+      if (metin.length <= 40 && !/^\d/.test(metin)) kategori = metin;
+      return;
+    }
+
+    if (bloklar.length === 0) return;
+
+    for (const b of bloklar) {
+      const urun = row[b.urun];
+      if (bos(urun)) continue;
+
+      const ad = String(urun).trim();
+      if (normalizeName(ad) === "urun") continue;
+
+      const fiyat = parsePrice(row[b.fiyat]);
+      const siraHam = Number(row[b.no]);
+
+      ham.push({
+        kategori,
+        sira_no: Number.isFinite(siraHam) ? siraHam : null,
+        urun_adi: ad,
+        urun_adi_norm: normalizeName(ad),
+        birim: bos(row[b.birim]) ? null : String(row[b.birim]).trim(),
+        birim_norm: normalizeUnit(row[b.birim]),
+        birim_fiyat: fiyat,
+      });
+
+      if (fiyat === null) fiyatsiz.push(ad);
+    }
+  });
+
+  if (!baslikBulundu) {
+    throw new Error(
+      'Listede "ÜRÜN" başlıklı bir sütun bulunamadı. Dosya beklenen ' +
+      "biçimde değil — ilk sayfada ÜRÜN / BİRİM / FİYAT başlıkları olmalı."
+    );
+  }
+
+  // Aynı liste içinde aynı ürün iki kez olamaz (veritabanı kısıtı).
+  // İlkini tutuyoruz, ikincisini raporluyoruz — sessizce yutmuyoruz.
+  const gorulen = new Set<string>();
+  const kalemler: FiyatListesiKalemi[] = [];
+  const cakisan: string[] = [];
+
+  for (const k of ham) {
+    if (gorulen.has(k.urun_adi_norm)) {
+      cakisan.push(k.urun_adi);
+      continue;
+    }
+    gorulen.add(k.urun_adi_norm);
+    kalemler.push(k);
+  }
+
+  return { kalemler, fiyatsiz, cakisan, dosyadakiTarih };
+}
+</file>
+
+<file path="src/lib/supabase.ts">
+import { createClient } from '@supabase/supabase-js'
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+
+export const supabase = createClient(supabaseUrl, supabaseKey)
+</file>
+
+<file path="public/file.svg">
+<svg fill="none" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 13.5V5.41a1 1 0 0 0-.3-.7L9.8.29A1 1 0 0 0 9.08 0H1.5v13.5A2.5 2.5 0 0 0 4 16h8a2.5 2.5 0 0 0 2.5-2.5m-1.5 0v-7H8v-5H3v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1M9.5 5V2.12L12.38 5zM5.13 5h-.62v1.25h2.12V5zm-.62 3h7.12v1.25H4.5zm.62 3h-.62v1.25h7.12V11z" clip-rule="evenodd" fill="#666" fill-rule="evenodd"/></svg>
+</file>
+
+<file path="public/globe.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><g clip-path="url(#a)"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.27 14.1a6.5 6.5 0 0 0 3.67-3.45q-1.24.21-2.7.34-.31 1.83-.97 3.1M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16m.48-1.52a7 7 0 0 1-.96 0H7.5a4 4 0 0 1-.84-1.32q-.38-.89-.63-2.08a40 40 0 0 0 3.92 0q-.25 1.2-.63 2.08a4 4 0 0 1-.84 1.31zm2.94-4.76q1.66-.15 2.95-.43a7 7 0 0 0 0-2.58q-1.3-.27-2.95-.43a18 18 0 0 1 0 3.44m-1.27-3.54a17 17 0 0 1 0 3.64 39 39 0 0 1-4.3 0 17 17 0 0 1 0-3.64 39 39 0 0 1 4.3 0m1.1-1.17q1.45.13 2.69.34a6.5 6.5 0 0 0-3.67-3.44q.65 1.26.98 3.1M8.48 1.5l.01.02q.41.37.84 1.31.38.89.63 2.08a40 40 0 0 0-3.92 0q.25-1.2.63-2.08a4 4 0 0 1 .85-1.32 7 7 0 0 1 .96 0m-2.75.4a6.5 6.5 0 0 0-3.67 3.44 29 29 0 0 1 2.7-.34q.31-1.83.97-3.1M4.58 6.28q-1.66.16-2.95.43a7 7 0 0 0 0 2.58q1.3.27 2.95.43a18 18 0 0 1 0-3.44m.17 4.71q-1.45-.12-2.69-.34a6.5 6.5 0 0 0 3.67 3.44q-.65-1.27-.98-3.1" fill="#666"/></g><defs><clipPath id="a"><path fill="#fff" d="M0 0h16v16H0z"/></clipPath></defs></svg>
+</file>
+
+<file path="public/next.svg">
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 394 80"><path fill="#000" d="M262 0h68.5v12.7h-27.2v66.6h-13.6V12.7H262V0ZM149 0v12.7H94v20.4h44.3v12.6H94v21h55v12.6H80.5V0h68.7zm34.3 0h-17.8l63.8 79.4h17.9l-32-39.7 32-39.6h-17.9l-23 28.6-23-28.6zm18.3 56.7-9-11-27.1 33.7h17.8l18.3-22.7z"/><path fill="#000" d="M81 79.3 17 0H0v79.3h13.6V17l50.2 62.3H81Zm252.6-.4c-1 0-1.8-.4-2.5-1s-1.1-1.6-1.1-2.6.3-1.8 1-2.5 1.6-1 2.6-1 1.8.3 2.5 1a3.4 3.4 0 0 1 .6 4.3 3.7 3.7 0 0 1-3 1.8zm23.2-33.5h6v23.3c0 2.1-.4 4-1.3 5.5a9.1 9.1 0 0 1-3.8 3.5c-1.6.8-3.5 1.3-5.7 1.3-2 0-3.7-.4-5.3-1s-2.8-1.8-3.7-3.2c-.9-1.3-1.4-3-1.4-5h6c.1.8.3 1.6.7 2.2s1 1.2 1.6 1.5c.7.4 1.5.5 2.4.5 1 0 1.8-.2 2.4-.6a4 4 0 0 0 1.6-1.8c.3-.8.5-1.8.5-3V45.5zm30.9 9.1a4.4 4.4 0 0 0-2-3.3 7.5 7.5 0 0 0-4.3-1.1c-1.3 0-2.4.2-3.3.5-.9.4-1.6 1-2 1.6a3.5 3.5 0 0 0-.3 4c.3.5.7.9 1.3 1.2l1.8 1 2 .5 3.2.8c1.3.3 2.5.7 3.7 1.2a13 13 0 0 1 3.2 1.8 8.1 8.1 0 0 1 3 6.5c0 2-.5 3.7-1.5 5.1a10 10 0 0 1-4.4 3.5c-1.8.8-4.1 1.2-6.8 1.2-2.6 0-4.9-.4-6.8-1.2-2-.8-3.4-2-4.5-3.5a10 10 0 0 1-1.7-5.6h6a5 5 0 0 0 3.5 4.6c1 .4 2.2.6 3.4.6 1.3 0 2.5-.2 3.5-.6 1-.4 1.8-1 2.4-1.7a4 4 0 0 0 .8-2.4c0-.9-.2-1.6-.7-2.2a11 11 0 0 0-2.1-1.4l-3.2-1-3.8-1c-2.8-.7-5-1.7-6.6-3.2a7.2 7.2 0 0 1-2.4-5.7 8 8 0 0 1 1.7-5 10 10 0 0 1 4.3-3.5c2-.8 4-1.2 6.4-1.2 2.3 0 4.4.4 6.2 1.2 1.8.8 3.2 2 4.3 3.4 1 1.4 1.5 3 1.5 5h-5.8z"/></svg>
+</file>
+
+<file path="public/vercel.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1155 1000"><path d="m577.3 0 577.4 1000H0z" fill="#fff"/></svg>
+</file>
+
+<file path="public/window.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill-rule="evenodd" clip-rule="evenodd" d="M1.5 2.5h13v10a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM0 1h16v11.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 0 12.5zm3.75 4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5M7 4.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0m1.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5" fill="#666"/></svg>
+</file>
+
+<file path="src/app/globals.css">
+@import "tailwindcss";
+</file>
+
+<file path="src/app/layout.tsx">
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "Fiyat Farkı Kontrol Sistemi",
+  description: "Tedarikçi fatura ve fiyat listesi karşılaştırma aracı",
+};
+
+export default function RootLayout({ children }: LayoutProps<"/">) {
+  return (
+    <html
+      lang="en"
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+    >
+      <body className="min-h-full flex flex-col">{children}</body>
+    </html>
+  );
+}
+</file>
+
+<file path="src/app/page.tsx">
+// ============================================================
+//  src/app/page.tsx
+//  Ana sayfa: iş akışı sırasına göre menü
+// ============================================================
+import Link from "next/link";
+import type { ComponentType } from "react";
+import {
+  ArrowRight,
+  Boxes,
+  ClipboardCheck,
+  FileSpreadsheet,
+  ReceiptText,
+  Scale,
+  Users,
+} from "lucide-react";
+
+// Sıra numaraları süs değil: her adım bir öncekine bağımlı.
+// Fiyat listesi yüklemeden fatura denetleyemezsin, master ürün
+// olmadan fiyat listesini eşleştiremezsin.
+
+const AKTIF_KART =
+  "group flex items-start gap-4 rounded-2xl border border-[#DDE3DC] bg-white p-5 transition-colors hover:border-[#1F5C3D] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] focus-visible:ring-offset-2";
+
+const PASIF_KART =
+  "flex items-start gap-4 rounded-2xl border border-dashed border-[#DDE3DC] bg-transparent p-5";
+
+function AdimIcerik({
+  no,
+  Ikon,
+  baslik,
+  aciklama,
+  pasif = false,
+}: {
+  no: number;
+  Ikon: ComponentType<{ className?: string }>;
+  baslik: string;
+  aciklama: string;
+  pasif?: boolean;
+}) {
+  return (
+    <>
+      <span
+        className={
+          pasif
+            ? "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#DDE3DC] text-sm font-semibold tabular-nums text-[#9AA69E]"
+            : "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#1F5C3D] text-sm font-semibold tabular-nums text-white"
+        }
+      >
+        {no}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-center gap-2">
+          <Ikon className={pasif ? "h-4 w-4 text-[#9AA69E]" : "h-4 w-4 text-[#1F5C3D]"} />
+          <span className={pasif ? "font-medium text-[#5B6660]" : "font-medium"}>
+            {baslik}
+          </span>
+          {pasif && (
+            <span className="rounded-full bg-[#F5EEDA] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[#8A6D12]">
+              Yakında
+            </span>
+          )}
+        </span>
+        <span
+          className={
+            pasif
+              ? "mt-1 block text-sm leading-relaxed text-[#9AA69E]"
+              : "mt-1 block text-sm leading-relaxed text-[#5B6660]"
+          }
+        >
+          {aciklama}
+        </span>
+      </span>
+    </>
+  );
+}
+
+const OK =
+  "mt-1 h-4 w-4 shrink-0 text-[#C6D0C6] transition-colors group-hover:text-[#1F5C3D]";
+
+export default function Home() {
+  return (
+    <main className="min-h-screen bg-[#F7F8F6] text-[#0F1A14]">
+      <div className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
+        <header className="mb-10">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+            Longosphere
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+            Fiyat Farkı Kontrol Sistemi
+          </h1>
+          <p className="mt-3 max-w-lg text-sm leading-relaxed text-[#5B6660]">
+            Tedarikçi faturalarındaki birim fiyatları fiyat listesiyle karşılaştırır,
+            aleyhe farkları ve iade edilecek tutarı hesaplar.
+          </p>
+        </header>
+
+        <ol className="space-y-3">
+          {/* 1 — hazır */}
+          <li>
+            <Link href="/import" className={AKTIF_KART}>
+              <AdimIcerik
+                no={1}
+                Ikon={Boxes}
+                baslik="Stok kartları"
+                aciklama="ElektraWeb stok listesini master ürün tablosuna aktar."
+              />
+              <ArrowRight className={OK} />
+            </Link>
+          </li>
+
+          {/* 2 — hazır */}
+          <li>
+            <Link href="/tedarikciler" className={AKTIF_KART}>
+              <AdimIcerik
+                no={2}
+                Ikon={Users}
+                baslik="Tedarikçiler"
+                aciklama="Fiyat listesi ve fatura yükleyeceğin firmaları tanımla."
+              />
+              <ArrowRight className={OK} />
+            </Link>
+          </li>
+
+          {/* 3 — hazır */}
+          <li>
+            <Link href="/fiyat-listeleri" className={AKTIF_KART}>
+              <AdimIcerik
+                no={3}
+                Ikon={FileSpreadsheet}
+                baslik="Fiyat listeleri"
+                aciklama="Tedarikçinin Excel listesini yükle. Denetimde bu listelerden bir veya birkaçını seçeceksin."
+              />
+              <ArrowRight className={OK} />
+            </Link>
+          </li>
+
+          {/* 4 — hazır */}
+          <li>
+            <Link href="/faturalar" className={AKTIF_KART}>
+              <AdimIcerik
+                no={4}
+                Ikon={ReceiptText}
+                baslik="Faturalar"
+                aciklama="ElektraWeb fatura export'unu yükle, satırları master ürünlere bağla."
+              />
+              <ArrowRight className={OK} />
+            </Link>
+          </li>
+
+          {/* 5 — henüz yok */}
+          <li className={PASIF_KART}>
+            <AdimIcerik
+              no={5}
+              Ikon={Scale}
+              baslik="Fiyat farkı denetimi"
+              aciklama="Fatura birim fiyatlarını seçtiğin listelerle kıyasla, aleyhe farkları hesapla, iade raporunu üret."
+              pasif
+            />
+          </li>
+        </ol>
+
+        <section className="mt-10">
+          <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.18em] text-[#5B6660]">
+            Diğer ekranlar
+          </h2>
+          <Link
+            href="/tesellum"
+            className="group flex items-center gap-3 rounded-xl border border-[#DDE3DC] bg-white px-5 py-4 transition-colors hover:border-[#1F5C3D] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1F5C3D] focus-visible:ring-offset-2"
+          >
+            <ClipboardCheck className="h-4 w-4 shrink-0 text-[#1F5C3D]" />
+            <span className="flex-1 text-sm font-medium">Tesellüm</span>
+            <ArrowRight className="h-4 w-4 text-[#C6D0C6] transition-colors group-hover:text-[#1F5C3D]" />
+          </Link>
+        </section>
+      </div>
+    </main>
+  );
+}
+</file>
+
+<file path=".gitignore">
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+</file>
+
+<file path="AGENTS.md">
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
+</file>
+
+<file path="CLAUDE.md">
+@AGENTS.md
+</file>
+
+<file path="eslint.config.mjs">
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
+  // Override default ignores of eslint-config-next.
+  globalIgnores([
+    // Default ignores of eslint-config-next:
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+  ]),
+]);
+
+export default eslintConfig;
+</file>
+
+<file path="next.config.ts">
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+};
+
+export default nextConfig;
+</file>
+
+<file path="package.json">
+{
+  "name": "fiyat-farki",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "lucide-react": "^1.32.0",
+    "next": "16.3.1",
+    "pdf-parse": "^2.4.5",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.1",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+</file>
+
+<file path="postcss.config.mjs">
+const config = {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  },
+};
+
+export default config;
+</file>
+
+<file path="README.md">
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "exclude": ["node_modules"]
+}
+</file>
+
+</files>
