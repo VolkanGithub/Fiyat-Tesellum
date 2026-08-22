@@ -58,25 +58,45 @@ export default function TesellumAnaliz() {
     if (!file) return;
     setLoading(true);
     setErrorMsg(null);
-    console.log("Sunucuya gönderilen dosya:", file.name);
+    console.log("1. Sunucuya gönderilen dosya:", file.name);
 
     const formData = new FormData();
     formData.append("file", file);
 
     try {
+      console.log("2. API'ye istek atılıyor (/api/read-pdf)...");
       const response = await fetch("/api/read-pdf", {
         method: "POST",
         body: formData,
       });
 
-      const result = await response.json();
+      console.log("3. API'den cevap geldi. HTTP Kodu:", response.status);
+
+      // Cevabı JSON'a çevirmeden önce ham metin olarak görelim
+      const textResult = await response.text();
+      console.log("4. API'nin Ham Cevabı:", textResult);
+
+      // Şimdi JSON'a çevirmeyi deneyelim
+      let result;
+      try {
+        result = JSON.parse(textResult);
+      } catch (e) {
+        throw new Error("Sunucu geçerli bir veri döndürmedi. Vercel çökmüş olabilir.");
+      }
 
       if (!response.ok || result.error) {
         throw new Error(result.error || "Sunucu hatası oluştu.");
       }
 
+      console.log("5. Çözümlenen Veriler (Tabloya gidecek):", result.data);
+
+      if (result.data && result.data.length === 0) {
+        setErrorMsg("PDF başarıyla okundu ama içinde eşleşen hiçbir ürün bulunamadı (Liste boş).");
+      }
+
       setItems(result.data || []);
     } catch (err: unknown) {
+      console.error("HATA YAKALANDI:", err);
       const errorMessage = err instanceof Error ? err.message : String(err);
       setErrorMsg(errorMessage);
     } finally {
@@ -99,7 +119,7 @@ export default function TesellumAnaliz() {
           <div className="flex items-center gap-4">
             <input
               type="file"
-              accept=".xlsx, .xls"
+              accept="application/pdf, .pdf"
               onChange={handleFileUpload}
               className="block w-full max-w-sm text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 transition-colors"
             />
