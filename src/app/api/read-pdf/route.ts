@@ -142,7 +142,8 @@ export async function POST(request: Request) {
         break;
       }
 
-      const stockMatch = trimLine.match(/^(\d{3}\.\d{4})\s+(.*)/);
+      // Stok kodu harf veya rakamla başlayabilir, içinde nokta veya tire olabilir, en az 3 karakter olmalıdır.
+      const stockMatch = trimLine.match(/^([A-Z0-9\.\-]{3,})\s+(.*)/i);
 
       if (stockMatch) {
         if (currentItem) rawItems.push(currentItem);
