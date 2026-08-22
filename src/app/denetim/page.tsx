@@ -134,13 +134,13 @@ export default function FaturaDenetim() {
             <div className="border-2 border-dashed border-blue-200 bg-blue-50/50 rounded-lg p-6 text-center">
               <FileSpreadsheet className="text-blue-500 mb-3 mx-auto" size={32} />
               <label className="block text-sm font-medium text-slate-700 mb-2">1. Fatura Yükle (Excel)</label>
-              <input type="file" accept=".xlsx, .xls" onChange={(e) => setFaturaDosyasi(e.target.files?.[0] || null)} className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700" />
+              <input type="file" accept=".xlsx, .xls" onClick={(e) => (e.currentTarget.value = "")} onChange={(e) => setFaturaDosyasi(e.target.files?.[0] || null)} className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700" />
             </div>
 
             <div className="border-2 border-dashed border-emerald-200 bg-emerald-50/50 rounded-lg p-6 text-center">
               <FileText className="text-emerald-500 mb-3 mx-auto" size={32} />
               <label className="block text-sm font-medium text-slate-700 mb-2">2. Fiyat Listesi Yükle (Excel)</label>
-              <input type="file" accept=".xlsx, .xls" onChange={(e) => setTeklifDosyasi(e.target.files?.[0] || null)} className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700" />
+              <input type="file" accept=".xlsx, .xls" onClick={(e) => (e.currentTarget.value = "")} onChange={(e) => setTeklifDosyasi(e.target.files?.[0] || null)} className="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700" />
             </div>
           </div>
 
