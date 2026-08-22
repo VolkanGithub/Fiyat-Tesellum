@@ -17,13 +17,8 @@ interface PDFPage {
 
 function findPagesInPDFData(obj: unknown): PDFPage[] | null {
   if (!obj || typeof obj !== 'object') return null;
-
   const record = obj as Record<string, unknown>;
-
-  if (Array.isArray(record.Pages)) {
-    return record.Pages as unknown as PDFPage[];
-  }
-
+  if (Array.isArray(record.Pages)) return record.Pages as unknown as PDFPage[];
   for (const key in record) {
     if (Object.prototype.hasOwnProperty.call(record, key)) {
       const result = findPagesInPDFData(record[key]);
@@ -56,27 +51,23 @@ export async function POST(request: Request) {
       });
 
       pdfParser.on("pdfParser_dataReady", (data: unknown) => resolve(data));
-
       pdfParser.parseBuffer(buffer);
     });
 
     const pdfPages = findPagesInPDFData(pdfData);
 
     if (!pdfPages || pdfPages.length === 0) {
-      const availableKeys = pdfData && typeof pdfData === 'object' ? Object.keys(pdfData).join(', ') : 'Boş Obje';
-      throw new Error(`PDF sayfaları bulunamadı! Kütüphanenin verdiği veri yapısı: [${availableKeys}]`);
+      throw new Error("PDF sayfaları kütüphane tarafından çözümlenemedi.");
     }
 
     let visualText = "";
 
     pdfPages.forEach((page: PDFPage) => {
       const lines: Record<string, { x: number, text: string }[]> = {};
-
       if (!page.Texts) return;
 
       page.Texts.forEach((t: PDFText) => {
         if (!t.R || !t.R[0] || !t.R[0].T) return;
-
         let text = "";
         try {
           text = decodeURIComponent(t.R[0].T);
@@ -93,61 +84,49 @@ export async function POST(request: Request) {
 
         const y = (Math.round(t.y * 10) / 10).toFixed(1);
         if (!lines[y]) lines[y] = [];
-
         lines[y].push({ x: t.x, text });
       });
 
       const yKeys = Object.keys(lines).map(parseFloat).sort((a, b) => a - b);
-
       yKeys.forEach(y => {
         const yStr = y.toFixed(1);
         lines[yStr].sort((a, b) => a.x - b.x);
-
         const lineString = lines[yStr].map((item: { x: number, text: string }) => item.text).join(" ");
-        visualText += lineString + "\n";
+        visualText += lineString + " "; // Satırları birleştirerek tek bir blok oluşturuyoruz
       });
     });
 
-    const rawLines = visualText.split('\n');
+    // ============================================================================
+    // 3. AŞAMA: ZIRHLI SPLIT ALGORİTMASI (Tek Satırlık Devasa Metni Parçalama)
+    // ============================================================================
+    // Stok kodları (Örn: 032.0008) kusursuz bir bıçaktır. Metni bu kodlardan kesiyoruz.
+    const parts = visualText.split(/(\d{3}\.\d{4})/);
     const rawItems = [];
-    let currentItem = null;
 
-    for (const line of rawLines) {
-      const trimLine = line.trim();
-      if (!trimLine) continue;
-
-      // Hata çıkaran break kaldırıldı, başlıkları atlayıp dosyayı okumaya devam eder.
-      if (trimLine.includes("Hesap Kodu") || trimLine.includes("Oluşturan") || trimLine.includes("Sayfa")) {
-        if (currentItem) rawItems.push(currentItem);
-        currentItem = null;
-        continue;
-      }
-
-      // Stok kodu esnekleştirildi (Harf, rakam, nokta ve tire destekler)
-      const stockMatch = trimLine.match(/^([A-Z0-9\.\-]{3,})\s+(.*)/i);
-
-      if (stockMatch) {
-        if (currentItem) rawItems.push(currentItem);
-        currentItem = {
-          stokKodu: stockMatch[1],
-          rawText: stockMatch[2] + " "
-        };
-      } else if (currentItem) {
-        currentItem.rawText += trimLine + " ";
-      }
+    // parts[0] -> Fatura başlıkları ve gereksiz kısımlar
+    // parts[1] -> Stok Kodu, parts[2] -> Kalan ürün detayları ve fiyatlar
+    for (let i = 1; i < parts.length; i += 2) {
+      const stokKodu = parts[i];
+      const detayText = parts[i + 1] || "";
+      rawItems.push({
+        stokKodu: stokKodu,
+        rawText: detayText
+      });
     }
-    if (currentItem) rawItems.push(currentItem);
 
+    // ============================================================================
+    // 4. AŞAMA: MATEMATİKSEL FİYAT RADARI
+    // ============================================================================
     const results = [];
     const parseNumber = (str: string) => parseFloat(str.replace(/\./g, '').replace(',', '.'));
 
     for (const item of rawItems) {
-      const unitMatch = item.rawText.match(/(.*?)\s+(\d+(?:\.\d+)?(?:,\d+)?)\s+(Kg|Lt|Adet|Gr|Kutu|Koli|Pk|Bağ|Demet)(.*)/i);
+      const unitMatch = item.rawText.match(/(.*?)\s+(Kg|Lt|Adet|Gr|Kutu|Koli|Pk|Bağ|Demet|Porsiyon|Şişe|Teneke)\s+(.*)/i);
 
       if (!unitMatch) {
         results.push({
           stokKodu: item.stokKodu,
-          stokAdi: item.rawText.trim(),
+          stokAdi: item.rawText.substring(0, 30).trim() + "...",
           miktar: 0,
           birim: "?",
           alisFiyati: 0,
@@ -160,38 +139,36 @@ export async function POST(request: Request) {
       }
 
       const stokAdi = unitMatch[1].trim();
-      const miktar = parseNumber(unitMatch[2]);
-      const birim = unitMatch[3];
-      const numbersPart = unitMatch[4].trim();
+      const birim = unitMatch[2];
+      const numbersPart = unitMatch[3].trim();
 
       const numTokens = numbersPart.split(/\s+/).filter(s => /^[\d\.,]+$/.test(s));
       const nums = numTokens.map(parseNumber);
 
-      let netFiyat = 0;
+      if (nums.length < 3) {
+        continue;
+      }
+
+      const netFiyat = nums[0]; // İlk sayı daima yeni alınan birim fiyatıdır
+      const miktar = nums[1];   // İkinci sayı daima alınan toplam miktardır
+      const expectedToplam = netFiyat * miktar;
       let oncekiFiyat: number | null = null;
-      let foundByMath = false;
 
-      for (let i = nums.length - 2; i >= 0; i--) {
-        const candNet = nums[i];
-        const candTotal = nums[i + 1];
-
-        if (candNet > 0 && Math.abs((candNet * miktar) - candTotal) < 2.0) {
-          netFiyat = candNet;
-
-          if (i > 0) {
-            oncekiFiyat = nums[i - 1];
-            if ([0, 1, 8, 10, 18, 20].includes(oncekiFiyat)) {
-              oncekiFiyat = null;
-            }
+      // Beklenen Matrahı (Toplam Tutarı) dizide arayıp buluyoruz. 
+      // Sağındaki ilk sayı bizim "Son Alış Fiyatı"mızdır.
+      for (let j = 2; j < nums.length; j++) {
+        if (Math.abs(nums[j] - expectedToplam) < 2.0) {
+          if (j + 1 < nums.length) {
+            oncekiFiyat = nums[j + 1];
+            if (oncekiFiyat === 0) oncekiFiyat = null;
           }
-          foundByMath = true;
           break;
         }
       }
 
-      if (!foundByMath && nums.length >= 7) {
-        netFiyat = nums[nums.length - 2];
-        oncekiFiyat = nums.length >= 8 ? nums[nums.length - 3] : null;
+      // Matematiksel radar bir şekilde ıskalarsa, genelde sondan 2. veya 3. sayı eski fiyattır. (Yedek Plan)
+      if (oncekiFiyat === null && nums.length >= 7) {
+        oncekiFiyat = nums[6];
       }
 
       let farkTl = 0;
@@ -222,11 +199,9 @@ export async function POST(request: Request) {
       });
     }
 
-    // Eğer PDF okunmasına rağmen liste boş çıkarsa, sebebi net görebilmek için ham metni yansıtır.
     if (results.length === 0) {
-      const preview = rawLines.slice(0, 20).join(" | ");
       return NextResponse.json({
-        error: "Eşleşme yok. PDF formatı farklı algılandı. Ham metin örneği: " + preview
+        error: "Eşleşme yok. PDF formatı farklı algılandı."
       }, { status: 400 });
     }
 
