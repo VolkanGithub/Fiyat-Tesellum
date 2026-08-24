@@ -1,29 +1,43 @@
 export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
-import { degerlendir, manuelSecimUygula } from '@/lib/matchEngine'; // HATA 1 ÇÖZÜLDÜ: Eklendi
+import { degerlendir, manuelSecimUygula } from '@/lib/matchEngine';
 import { createClient } from '@supabase/supabase-js';
 
 export async function POST(request: Request) {
-  try { // Ana Hata Yakalayıcı Başlangıcı
+  try {
     const formData = await request.formData();
-    const faturaFile = formData.get('fatura') as File;
-    const teklifFile = formData.get('teklif') as File;
+    const faturaFile = formData.get('fatura') as File | null;
+    const teklifFile = formData.get('teklif') as File | null;
 
     if (!faturaFile || !teklifFile) {
       return NextResponse.json({ error: 'Lütfen hem fatura hem de fiyat listesi dosyasını yükleyin.' }, { status: 400 });
     }
 
+    if (typeof faturaFile === 'string' || typeof teklifFile === 'string' || typeof faturaFile.arrayBuffer !== 'function') {
+      return NextResponse.json({ error: 'Dosya formatı tarayıcı tarafından desteklenmiyor. Farklı bir tarayıcıdan deneyin.' }, { status: 400 });
+    }
+
     const faturaBuffer = Buffer.from(await faturaFile.arrayBuffer());
     const teklifBuffer = Buffer.from(await teklifFile.arrayBuffer());
 
-    const faturaWb = XLSX.read(faturaBuffer, { type: 'buffer' });
-    const teklifWb = XLSX.read(teklifBuffer, { type: 'buffer' });
+    if (faturaBuffer.length === 0 || teklifBuffer.length === 0) {
+      return NextResponse.json({ error: 'Yüklenen dosyalardan biri boş (0 byte) ulaştı. Dosya arka planda Excel\'de açıksa lütfen kapatıp tekrar yükleyin.' }, { status: 400 });
+    }
+
+    let faturaWb;
+    let teklifWb;
+
+    try {
+      faturaWb = XLSX.read(faturaBuffer, { type: 'buffer' });
+      teklifWb = XLSX.read(teklifBuffer, { type: 'buffer' });
+    } catch {
+      return NextResponse.json({ error: 'Excel dosyası okunamadı. Dosya bozuk, şifreli veya desteklenmeyen bir formatta kaydedilmiş olabilir.' }, { status: 400 });
+    }
 
     const faturaSheet = XLSX.utils.sheet_to_json(faturaWb.Sheets[faturaWb.SheetNames[0]], { header: 1 }) as unknown[][];
     const teklifSheet = XLSX.utils.sheet_to_json(teklifWb.Sheets[teklifWb.SheetNames[0]], { header: 1 }) as unknown[][];
 
-    // Evrensel Türkçe Harf Temizleyici
     const normalizeBaslik = (s: string) => {
       return s.replace(/İ/g, 'i')
         .replace(/I/g, 'ı')
@@ -158,20 +172,25 @@ export async function POST(request: Request) {
     }
 
     // ============================================================================
-    // 3. SUPABASE HAFIZA (ÖĞRENEN SİSTEM)
+    // 3. SUPABASE HAFIZA (ÖĞRENEN SİSTEM) VE ÇÖKME KALKANI
     // ============================================================================
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
     const hafizaMap = new Map<string, string>();
     try {
-      const { data: hafizaVerisi } = await supabase.from('eslesme_hafizasi').select('fatura_urun_adi, teklif_urun_adi');
-      if (hafizaVerisi) {
-        hafizaVerisi.forEach(row => hafizaMap.set(row.fatura_urun_adi, row.teklif_urun_adi));
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+      // ZIRH 5: Eğer Vercel'de anahtarlar eksikse Supabase'i atla, uygulamayı ÇÖKERTME!
+      if (supabaseUrl && supabaseKey) {
+        const supabase = createClient(supabaseUrl, supabaseKey);
+        const { data: hafizaVerisi } = await supabase.from('eslesme_hafizasi').select('fatura_urun_adi, teklif_urun_adi');
+        if (hafizaVerisi) {
+          hafizaVerisi.forEach(row => hafizaMap.set(row.fatura_urun_adi, row.teklif_urun_adi));
+        }
+      } else {
+        console.warn("Supabase anahtarları bulunamadı. Öğrenen hafıza devre dışı bırakıldı, analiz devam ediyor.");
       }
-    } catch (e) {
-      console.warn("Hafıza çekilemedi, akıllı tahminle devam ediliyor.");
+    } catch {
+      console.warn("Hafıza çekilirken ağ hatası oluştu, akıllı tahminle devam ediliyor.");
     }
 
     // ============================================================================
@@ -193,9 +212,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true, data: sonuclar });
 
-  } catch (error: unknown) { // HATA 2 ÇÖZÜLDÜ: Silinen Süslü Parantezler İade Edildi!
+  } catch (error: unknown) {
     console.error("Excel Karşılaştırma Hatası:", error);
     const errorMessage = error instanceof Error ? error.message : "Bilinmeyen bir hata oluştu";
-    return NextResponse.json({ error: errorMessage }, { status: 500 });
+    return NextResponse.json({ error: `Hata oluştu: ${errorMessage}. Lütfen dosyayı kontrol edin.` }, { status: 400 });
   }
 }
