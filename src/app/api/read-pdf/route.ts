@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import PDFParser from 'pdf2json';
 
 // ============================================================================
-// TYPESCRIPT ZIRHI
+// TYPESCRIPT ZIRHI (ESLint'in kızdığı 'any' hatalarını çözen yapı)
 // ============================================================================
 interface PDFTextRun {
   T: string;
@@ -18,8 +18,9 @@ interface PDFPage {
   Texts: PDFText[];
 }
 
-function findPagesInPDFData(obj: unknown): PDFPage[] | null {
-  if (!obj || typeof obj !== 'object') return null;
+// Gelen bilinmeyen (unknown) verinin içinden sayfaları güvenle çıkaran fonksiyon
+function findPagesInPDFData(obj: unknown): PDFPage[] {
+  if (!obj || typeof obj !== 'object') return [];
 
   const record = obj as Record<string, unknown>;
 
@@ -30,10 +31,10 @@ function findPagesInPDFData(obj: unknown): PDFPage[] | null {
   for (const key in record) {
     if (Object.prototype.hasOwnProperty.call(record, key)) {
       const result = findPagesInPDFData(record[key]);
-      if (result) return result;
+      if (result.length > 0) return result;
     }
   }
-  return null;
+  return [];
 }
 
 export async function POST(request: Request) {
@@ -49,185 +50,125 @@ export async function POST(request: Request) {
     const buffer = Buffer.from(arrayBuffer);
 
     // ============================================================================
-    // 1. AŞAMA: JSON KOORDİNAT MODU
+    // 1. AŞAMA: SİSTEMİ ÇÖKERTMEYEN GÜVENİLİR PDF OKUYUCU
     // ============================================================================
     const pdfData = await new Promise<unknown>((resolve, reject) => {
       const pdfParser = new PDFParser();
-
-      pdfParser.on("pdfParser_dataError", (errData: unknown) => {
-        const errorMsg = typeof errData === 'object' && errData !== null && 'parserError' in errData
-          ? String((errData as Record<string, unknown>).parserError)
-          : "Bilinmeyen PDF okuma hatası";
-        reject(new Error(errorMsg));
-      });
-
-      pdfParser.on("pdfParser_dataReady", (data: unknown) => resolve(data));
-
+      pdfParser.on("pdfParser_dataError", () => reject(new Error("PDF okuma hatası")));
+      pdfParser.on("pdfParser_dataReady", resolve);
       pdfParser.parseBuffer(buffer);
     });
 
-    // ============================================================================
-    // 2. AŞAMA: İNSAN GÖZÜ GİBİ OKUMA (Görsel İnşa Algoritması)
-    // ============================================================================
     const pdfPages = findPagesInPDFData(pdfData);
+    if (pdfPages.length === 0) throw new Error("Sayfa bulunamadı");
 
-    if (!pdfPages || pdfPages.length === 0) {
-      const availableKeys = pdfData && typeof pdfData === 'object' ? Object.keys(pdfData).join(', ') : 'Boş Obje';
-      throw new Error(`PDF sayfaları bulunamadı! Kütüphanenin verdiği veri yapısı: [${availableKeys}]`);
-    }
+    // ============================================================================
+    // 2. AŞAMA: SAYFALARI VE SATIRLARI DÜZENE SOKMA
+    // ============================================================================
+    const linesMap = new Map<number, { x: number, text: string }[]>();
 
-    let visualText = "";
-
-    pdfPages.forEach((page: PDFPage) => {
-      const lines: Record<string, { x: number, text: string }[]> = {};
-
+    pdfPages.forEach((page: PDFPage, pageIndex: number) => {
       if (!page.Texts) return;
+
+      // Kilit Hamle 1: Her sayfaya 2000 piksel mesafe koy ki sayfalar birbirine (Bal ve İncir) karışmasın.
+      const pageOffset = pageIndex * 2000;
 
       page.Texts.forEach((t: PDFText) => {
         if (!t.R || !t.R[0] || !t.R[0].T) return;
-
         let text = "";
-        try {
-          text = decodeURIComponent(t.R[0].T);
-        } catch {
-          try {
-            text = decodeURIComponent(t.R[0].T.replace(/%(?![0-9a-fA-F]{2})/g, "%25"));
-          } catch {
-            text = t.R[0].T;
-          }
-        }
-
+        try { text = decodeURIComponent(t.R[0].T); } catch { text = t.R[0].T; }
         text = text.trim();
         if (!text) return;
 
-        const y = (Math.round(t.y * 10) / 10).toFixed(1);
-        if (!lines[y]) lines[y] = [];
+        // Kilit Hamle 2: Y eksenindeki mikro kaymaları (0.1 hassasiyetle) tek satırda birleştir.
+        const y = Math.round((t.y + pageOffset) * 10) / 10;
 
-        lines[y].push({ x: t.x, text });
-      });
-
-      const yKeys = Object.keys(lines).map(parseFloat).sort((a, b) => a - b);
-
-      yKeys.forEach(y => {
-        const yStr = y.toFixed(1);
-        lines[yStr].sort((a, b) => a.x - b.x);
-
-        const lineString = lines[yStr].map((item: { x: number, text: string }) => item.text).join(" ");
-        visualText += lineString + "\n";
+        if (!linesMap.has(y)) linesMap.set(y, []);
+        linesMap.get(y)!.push({ x: t.x, text });
       });
     });
 
-    // ============================================================================
-    // 3. AŞAMA: ÜRÜN BLOKLARINI AYIRMA
-    // ============================================================================
-    const rawLines = visualText.split('\n');
-    const rawItems = [];
-    let currentItem = null;
-
-    for (const line of rawLines) {
-      const trimLine = line.trim();
-      if (!trimLine) continue;
-
-      if (trimLine.includes("Hesap Kodu") || trimLine.includes("Oluşturan")) {
-        if (currentItem) rawItems.push(currentItem);
-        currentItem = null;
-        continue;
-      }
-
-      const stockMatch = trimLine.match(/(\d{3}\.\d{4})\s+(.*)/);
-
-      if (stockMatch) {
-        if (currentItem) rawItems.push(currentItem);
-        currentItem = {
-          stokKodu: stockMatch[1],
-          rawText: stockMatch[2] + " "
-        };
-      } else if (currentItem) {
-        currentItem.rawText += trimLine + " ";
-      }
-    }
-    if (currentItem) rawItems.push(currentItem);
-
-    // ============================================================================
-    // 4. AŞAMA: MATEMATİKSEL FİYAT ÇÖZÜCÜ VE ZAM KONTROLÜ
-    // ============================================================================
+    const sortedY = Array.from(linesMap.keys()).sort((a, b) => a - b);
     const results = [];
     const parseNumber = (str: string) => parseFloat(str.replace(/\./g, '').replace(',', '.'));
 
-    for (const item of rawItems) {
-      const unitMatch = item.rawText.match(/(.*?)\s+(Kg|Lt|Adet|Gr|Kutu|Koli|Pk|Bağ|Demet)\s+(.*)/i);
+    // ============================================================================
+    // 3. AŞAMA: SENİN MATEMATİĞİN (Sondan 3 ve Sondan 2 Kuralı)
+    // ============================================================================
+    for (const y of sortedY) {
+      const rowElements = linesMap.get(y)!;
+      // Satır içindeki kelimeleri soldan sağa hizala
+      rowElements.sort((a, b) => a.x - b.x);
+      const rowText = rowElements.map(e => e.text).join(" ");
 
-      if (!unitMatch) {
-        results.push({
-          stokKodu: item.stokKodu,
-          stokAdi: item.rawText.trim(),
-          miktar: 0,
-          birim: "?",
-          alisFiyati: 0,
-          oncekiFiyat: 0,
-          farkTl: 0,
-          farkYuzde: 0,
-          durum: 'eksik_veri'
-        });
-        continue;
-      }
+      // Kilit Hamle 3: SADECE stok kodu (Örn: 027.0004) ile başlayan satırları oku.
+      // Bu sayede VKN, Tarih, "F&W Mutfak" gibi tüm alt ve üst bilgileri çöpe atar.
+      if (/^\d{3}\.\d{4}/.test(rowText)) {
+        const tokens = rowText.split(/\s+/);
+        if (tokens.length < 8) continue; // Yarım kalmış satırları atla
 
-      const stokAdi = unitMatch[1].trim();
-      const birim = unitMatch[2];
-      const numbersPart = unitMatch[3].trim();
+        const stokKodu = tokens[0];
 
-      const numTokens = numbersPart.split(/\s+/).filter(s => /^[\d\.,]+$/.test(s));
-      const nums = numTokens.map(parseNumber);
-
-      const netFiyat = nums[0] || 0;
-      const miktar = nums[1] || 0;
-      let oncekiFiyat: number | null = null;
-
-      if (nums.length >= 5) {
-        const sonSayi = nums[nums.length - 1];
-        const ondanOnceki = nums[nums.length - 2];
-        const gercekToplam = netFiyat * miktar;
-
-        if (sonSayi > 0 && Math.abs(sonSayi - gercekToplam) > 2.0 && ![0, 1, 8, 10, 18, 20].includes(sonSayi)) {
-          oncekiFiyat = sonSayi;
-        } else if (ondanOnceki > 0 && Math.abs(ondanOnceki - gercekToplam) > 2.0 && ![0, 1, 8, 10, 18, 20].includes(ondanOnceki)) {
-          oncekiFiyat = ondanOnceki;
+        // Birimi bul (Kg, Lt, Adet vs.)
+        let unitIndex = -1;
+        for (let i = 1; i < tokens.length; i++) {
+          if (/^(Kg|Lt|Adet|Gr|Kutu|Koli|Pk|Bağ|Demet|Şişe|Teneke|Paket)$/i.test(tokens[i])) {
+            unitIndex = i;
+            break;
+          }
         }
+
+        if (unitIndex === -1) continue;
+
+        // Ürün Adı, 1. indexten (stok kodundan sonra) birimden bir önceki indexe kadardır
+        const stokAdi = tokens.slice(1, unitIndex - 1).join(" ");
+        // Miktar, birimden tam bir önceki sayıdır
+        const miktar = parseNumber(tokens[unitIndex - 1]);
+        const birim = tokens[unitIndex];
+
+        // ============================================================================
+        // ELEKTRAWEB SIKIYÖNETİMİ: Fiyatlar her zaman cümlenin EN SONUNDADIR.
+        // ============================================================================
+        const oncekiFiyat = parseNumber(tokens[tokens.length - 3]); // Sondan 3. (Son Alış B.Fiyat) - ESKİ FİYAT
+        const alisFiyati = parseNumber(tokens[tokens.length - 2]);  // Sondan 2. (Net B.Fiyat) - YENİ FİYAT
+
+        let farkTl = 0;
+        let farkYuzde = 0;
+        let durum = 'fark_yok';
+
+        if (oncekiFiyat > 0) {
+          farkTl = alisFiyati - oncekiFiyat;
+          farkYuzde = (farkTl / oncekiFiyat) * 100;
+
+          if (farkTl > 0.01) durum = 'aleyhte_fark'; // ZAMLI (Yeni fiyat büyük)
+          else if (farkTl < -0.01) durum = 'lehte_fark'; // UCUZLAMIŞ (Yeni fiyat küçük)
+          else durum = 'fark_yok'; // AYNI
+        } else {
+          durum = 'yeni_urun';
+        }
+
+        results.push({
+          stokKodu,
+          stokAdi,
+          miktar,
+          birim,
+          alisFiyati,
+          oncekiFiyat,
+          farkTl,
+          farkYuzde,
+          durum
+        });
       }
+    }
 
-      let farkTl = 0;
-      let farkYuzde = 0;
-      let durum = 'fark_yok';
-
-      if (oncekiFiyat !== null && oncekiFiyat > 0) {
-        farkTl = netFiyat - oncekiFiyat;
-        farkYuzde = (farkTl / oncekiFiyat) * 100;
-
-        if (farkTl > 0.01) durum = 'aleyhte_fark';
-        else if (farkTl < -0.01) durum = 'lehte_fark';
-        else durum = 'fark_yok';
-      } else {
-        durum = 'yeni_urun';
-      }
-
-      results.push({
-        stokKodu: item.stokKodu,
-        stokAdi,
-        miktar,
-        birim,
-        alisFiyati: netFiyat,
-        oncekiFiyat,
-        farkTl,
-        farkYuzde,
-        durum
-      });
+    if (results.length === 0) {
+      return NextResponse.json({ error: "Fatura okunamadı. Lütfen PDF'i kontrol edin." }, { status: 400 });
     }
 
     return NextResponse.json({ success: true, data: results });
 
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error("PDF okuma hatası:", errorMessage);
-    return NextResponse.json({ error: errorMessage }, { status: 500 });
+    return NextResponse.json({ error: `Hata oluştu: ${errorMessage}` }, { status: 500 });
   }
 }

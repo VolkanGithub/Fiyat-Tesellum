@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Upload, FileSpreadsheet, FileText, AlertTriangle, CheckCircle2, TrendingUp, TrendingDown, HelpCircle, AlertCircle, Download } from "lucide-react";
+import { Upload, FileSpreadsheet, FileText, AlertTriangle, CheckCircle2, TrendingUp, TrendingDown, HelpCircle, AlertCircle, Download, ToggleRight, ToggleLeft } from "lucide-react";
 import { DenetimSatiri, manuelSecimUygula } from "@/lib/matchEngine";
-import * as XLSX from "xlsx"; // EXCEL ÇIKTISI İÇİN EKLENDİ
+import * as XLSX from "xlsx";
 
 export default function FaturaDenetim() {
   const [faturaDosyasi, setFaturaDosyasi] = useState<File | null>(null);
@@ -11,6 +11,9 @@ export default function FaturaDenetim() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [sonuclar, setSonuclar] = useState<DenetimSatiri[]>([]);
+
+  // CFO FİLTRESİ: Dışlanan Ürünlerin İndekslerini Tutar
+  const [dislananUrunler, setDislananUrunler] = useState<Set<number>>(new Set());
 
   // Yardımcı Formatlayıcılar
   const formatCurrency = (val: number | null) => {
@@ -23,12 +26,24 @@ export default function FaturaDenetim() {
     return `%${val.toFixed(2)}`;
   };
 
+  // Dışlama Butonu Aksiyonu
+  const handleToggleDislama = (index: number) => {
+    const yeniDislananlar = new Set(dislananUrunler);
+    if (yeniDislananlar.has(index)) {
+      yeniDislananlar.delete(index); // Tekrar aktif et
+    } else {
+      yeniDislananlar.add(index); // Hesaplamadan çıkar
+    }
+    setDislananUrunler(yeniDislananlar);
+  };
+
   // 1. API'ye İstek Atma
   const handleKarsilastir = async () => {
     if (!faturaDosyasi || !teklifDosyasi) return;
     setLoading(true);
     setErrorMsg(null);
     setSonuclar([]);
+    setDislananUrunler(new Set()); // Yeni dosya yüklendiğinde filtreleri sıfırla
 
     const formData = new FormData();
     formData.append("fatura", faturaDosyasi);
@@ -47,7 +62,6 @@ export default function FaturaDenetim() {
     }
   };
 
-  // 2. Özgür Dropdown: Her zaman değiştirilebilir Manuel Eşleştirme
   // 2. Özgür Dropdown ve Hafızaya Kayıt
   const handleManuelSecim = async (index: number, secilenUrunAdi: string) => {
     const satir = sonuclar[index];
@@ -60,7 +74,7 @@ export default function FaturaDenetim() {
     yeniSonuclar[index] = guncellenmisSatir;
     setSonuclar(yeniSonuclar);
 
-    // Arka Planda Supabase'e Fısılda (Kullanıcıyı Bekletmez)
+    // Arka Planda Supabase'e Fısılda
     try {
       await fetch('/api/save-match', {
         method: 'POST',
@@ -75,10 +89,24 @@ export default function FaturaDenetim() {
     }
   };
 
-  // 3. Fiyat Farkı İtiraz Raporunu Excel Olarak İndirme
+  // 3. Fiyat Farkı İtiraz Raporunu Excel Olarak İndirme (SADECE ZAMLILAR)
   const handleExportExcel = () => {
-    const exportData = sonuclar.map(item => {
-      const toplamFark = item.farkTl > 0 ? item.farkTl * item.faturaMiktar : 0;
+    // Sadece dışlanmayan VE fiyatı aleyhte (zamlı) olan ürünleri filtrele
+    const zamliUrunler = sonuclar.filter((item, idx) => {
+      const isDislandi = dislananUrunler.has(idx);
+      const isGercekZam = item.farkTl >= 0.01; // Sadece 1 kuruştan büyük farkları al (Küsürat kalkanı)
+
+      return !isDislandi && isGercekZam;
+    });
+
+    if (zamliUrunler.length === 0) {
+      alert("Faturada itiraz edilecek (zamlı kesilmiş) herhangi bir kalem bulunmuyor.");
+      return;
+    }
+
+    const exportData = zamliUrunler.map(item => {
+      const toplamFark = item.farkTl * item.faturaMiktar;
+
       return {
         "Fatura Ürün Adı": item.faturaUrunAdi,
         "Miktar": item.faturaMiktar,
@@ -86,40 +114,41 @@ export default function FaturaDenetim() {
         "Eşleşen (Anlaşılan) Ürün": item.eslesenTeklifUrunAdi || "EŞLEŞTİRİLMEDİ",
         "Anlaşılan Fiyat (TL)": item.teklifFiyat || 0,
         "Faturadaki Kesilen Fiyat (TL)": item.faturaBirimFiyat,
-        "Birim Başına Zam (TL)": item.farkTl > 0 ? item.farkTl : 0,
+        "Birim Başına Zam (TL)": item.farkTl,
         "TOPLAM FAZLA KESİNTİ (TL)": toplamFark,
-        "Durum": item.durum === 'aleyhte_fark' ? 'ZAMLI KESİLMİŞ' : (item.durum === 'lehte_fark' ? 'İNDİRİMLİ' : (item.durum === 'fark_yok' ? 'AYNI' : 'BELİRSİZ'))
+        "Durum": "ZAMLI KESİLMİŞ"
       };
     });
 
     const ws = XLSX.utils.json_to_sheet(exportData);
 
-    // Sütun Genişliklerini Ayarlama
     ws["!cols"] = [
       { wch: 30 }, { wch: 10 }, { wch: 10 }, { wch: 35 },
       { wch: 20 }, { wch: 25 }, { wch: 20 }, { wch: 25 }, { wch: 15 }
     ];
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Fiyat Farkı İtirazları");
+    XLSX.utils.book_append_sheet(wb, ws, "İtiraz Edilecek Kalemler");
 
-    // Dosyayı İndirt
     XLSX.writeFile(wb, `Fiyat_Farki_Itiraz_Raporu_${new Date().toLocaleDateString('tr-TR')}.xlsx`);
   };
 
   // Durum Renklendirmeleri
   const renderDurumBadge = (durum: DenetimSatiri["durum"]) => {
     switch (durum) {
-      case "aleyhte_fark": return <span className="flex items-center gap-1 bg-red-100 text-red-700 px-2 py-1 rounded text-xs font-bold"><TrendingUp size={14} /> ZAMLI</span>;
-      case "lehte_fark": return <span className="flex items-center gap-1 bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold"><TrendingDown size={14} /> UCUZLAMIŞ</span>;
-      case "fark_yok": return <span className="flex items-center gap-1 bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold"><CheckCircle2 size={14} /> AYNI</span>;
-      case "supheli_eslesme": return <span className="flex items-center gap-1 bg-orange-100 text-orange-700 px-2 py-1 rounded text-xs font-bold"><AlertTriangle size={14} /> ONAY BEKLİYOR</span>;
-      case "eslesme_yok": return <span className="flex items-center gap-1 bg-slate-200 text-slate-700 px-2 py-1 rounded text-xs font-bold"><HelpCircle size={14} /> BULUNAMADI</span>;
+      case "aleyhte_fark": return <span className="flex items-center justify-center gap-1 bg-red-100 text-red-700 px-2 py-1 rounded text-xs font-bold w-full"><TrendingUp size={14} /> ZAMLI</span>;
+      case "lehte_fark": return <span className="flex items-center justify-center gap-1 bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold w-full"><TrendingDown size={14} /> UCUZ</span>;
+      case "fark_yok": return <span className="flex items-center justify-center gap-1 bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold w-full"><CheckCircle2 size={14} /> AYNI</span>;
+      case "supheli_eslesme": return <span className="flex items-center justify-center gap-1 bg-orange-100 text-orange-700 px-2 py-1 rounded text-xs font-bold w-full"><AlertTriangle size={14} /> ONAY</span>;
+      case "eslesme_yok": return <span className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 px-2 py-1 rounded text-xs font-bold w-full"><HelpCircle size={14} /> BOŞ</span>;
       default: return null;
     }
   };
 
-  const toplamZarar = sonuclar.filter(s => s.farkTl > 0).reduce((acc, curr) => acc + (curr.farkTl * curr.faturaMiktar), 0);
+  // AKILLI MATEMATİK: Zarar hesaplarken dışlananları ve 1 kuruştan küçük farkları atlıyoruz
+  const toplamZarar = sonuclar
+    .filter((s, idx) => !dislananUrunler.has(idx) && s.farkTl > 0.01)
+    .reduce((acc, curr) => acc + (curr.farkTl * curr.faturaMiktar), 0);
 
   return (
     <main className="min-h-screen bg-slate-50 p-8">
@@ -151,7 +180,7 @@ export default function FaturaDenetim() {
           )}
 
           <div className="mt-6 flex justify-end">
-            <button onClick={handleKarsilastir} disabled={!faturaDosyasi || !teklifDosyasi || loading} className="flex items-center gap-2 bg-slate-800 text-white px-8 py-3 rounded-md font-medium hover:bg-slate-900 disabled:opacity-50">
+            <button onClick={handleKarsilastir} disabled={!faturaDosyasi || !teklifDosyasi || loading} className="flex items-center gap-2 bg-slate-800 text-white px-8 py-3 rounded-md font-medium hover:bg-slate-900 disabled:opacity-50 transition-colors">
               {loading ? "Karşılaştırılıyor..." : <><Upload size={18} /> Karşılaştırmayı Başlat</>}
             </button>
           </div>
@@ -160,10 +189,8 @@ export default function FaturaDenetim() {
         {/* Sonuçlar ve CFO Özeti */}
         {sonuclar.length > 0 && (
           <div className="space-y-4">
-
-            {/* CFO Dashboard Kartları ve Export Butonu */}
             <div className="flex flex-col md:flex-row gap-4 items-stretch">
-              <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col">
                   <span className="text-sm font-medium text-slate-500">İncelenen Kalem</span>
                   <span className="text-2xl font-bold text-slate-800">{sonuclar.length} Ürün</span>
@@ -172,13 +199,16 @@ export default function FaturaDenetim() {
                   <span className="text-sm font-medium text-slate-500">Müdahale Bekleyen</span>
                   <span className="text-2xl font-bold text-orange-600">{sonuclar.filter(s => s.durum === 'supheli_eslesme' || s.durum === 'eslesme_yok').length} Ürün</span>
                 </div>
+                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col">
+                  <span className="text-sm font-medium text-slate-500">Hesaba Katılmayan (İptal)</span>
+                  <span className="text-2xl font-bold text-slate-400">{dislananUrunler.size} Ürün</span>
+                </div>
                 <div className="bg-red-50 p-4 rounded-xl border border-red-200 shadow-sm flex flex-col">
                   <span className="text-sm font-medium text-red-600">Faturadaki Toplam Zarar</span>
                   <span className="text-2xl font-bold text-red-700">{formatCurrency(toplamZarar)}</span>
                 </div>
               </div>
 
-              {/* İtiraz Raporu İndir Butonu */}
               <button
                 onClick={handleExportExcel}
                 className="flex items-center justify-center gap-2 bg-emerald-600 text-white px-6 py-4 rounded-xl font-bold shadow-sm hover:bg-emerald-700 transition-colors"
@@ -194,6 +224,7 @@ export default function FaturaDenetim() {
                 <table className="w-full text-sm text-left">
                   <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
                     <tr>
+                      <th className="px-4 py-3 text-center">Hesaba Kat</th>
                       <th className="px-4 py-3">Fatura Ürün Adı</th>
                       <th className="px-4 py-3">Miktar</th>
                       <th className="px-4 py-3">Eşleşen (Teklif) Ürün</th>
@@ -204,43 +235,69 @@ export default function FaturaDenetim() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {sonuclar.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 font-medium text-slate-800">{item.faturaUrunAdi}</td>
-                        <td className="px-4 py-3 text-slate-600 whitespace-nowrap">{item.faturaMiktar} {item.faturaBirim}</td>
+                    {sonuclar.map((item, idx) => {
+                      const isDislandi = dislananUrunler.has(idx);
 
-                        {/* ÖZGÜR DROPDOWN: Her zaman açık ve düzenlenebilir */}
-                        <td className="px-4 py-3 min-w-[250px]">
-                          <select
-                            className={`w-full text-xs border rounded p-2 outline-none focus:ring-1 ${item.durum === 'eslesme_yok' || item.durum === 'supheli_eslesme'
-                              ? 'border-orange-300 bg-orange-50 text-orange-800 focus:ring-orange-500'
-                              : 'border-slate-200 bg-transparent text-slate-700 focus:ring-slate-500'
-                              }`}
-                            value={item.eslesenTeklifUrunAdi || ""}
-                            onChange={(e) => handleManuelSecim(idx, e.target.value)}
-                          >
-                            <option value="" disabled>Doğru Ürünü Seçin (Eşleşme Yok)...</option>
-                            {item.adaylar.map(aday => (
-                              <option key={aday.teklifUrunAdi} value={aday.teklifUrunAdi}>
-                                {aday.teklifUrunAdi} ({formatCurrency(aday.teklifFiyat)}) - %{aday.skor} Benzerlik
-                              </option>
-                            ))}
-                          </select>
-                        </td>
+                      // KÜSÜRAT KALKANI: Ekrana basmadan önce hayalet kuruşları (0.01 altı) tamamen temizle
+                      const isFarkYok = Math.abs(item.farkTl) < 0.01;
+                      const displayFarkTl = isFarkYok ? 0 : item.farkTl;
+                      const displayFarkYuzde = isFarkYok ? 0 : item.farkYuzde;
 
-                        <td className="px-4 py-3 text-right text-slate-600">{formatCurrency(item.teklifFiyat)}</td>
-                        <td className="px-4 py-3 text-right font-medium text-slate-800">{formatCurrency(item.faturaBirimFiyat)}</td>
+                      // Renk Belirleme (Küsüratsız temiz veriye göre)
+                      let farkRenkClass = 'text-slate-400';
+                      if (!isDislandi) {
+                        if (displayFarkTl > 0) farkRenkClass = 'text-red-600';
+                        else if (displayFarkTl < 0) farkRenkClass = 'text-green-600';
+                      }
 
-                        <td className={`px-4 py-3 text-right font-bold whitespace-nowrap ${item.farkTl > 0 ? 'text-red-600' : item.farkTl < 0 ? 'text-green-600' : 'text-slate-400'}`}>
-                          {item.farkTl > 0 ? "+" : ""}{item.farkTl === 0 ? "-" : formatCurrency(item.farkTl)}
-                          {item.farkYuzde !== 0 && <span className="block text-[10px] opacity-75">{formatPercent(item.farkYuzde)}</span>}
-                        </td>
-
-                        <td className="px-4 py-3 flex justify-center">
-                          {renderDurumBadge(item.durum)}
-                        </td>
-                      </tr>
-                    ))}
+                      return (
+                        <tr key={idx} className={`transition-colors ${isDislandi ? 'bg-slate-100 opacity-50' : 'hover:bg-slate-50'}`}>
+                          {/* CFO Switch Butonu */}
+                          <td className="px-4 py-3 text-center">
+                            <button
+                              onClick={() => handleToggleDislama(idx)}
+                              className={`transition-colors ${isDislandi ? 'text-slate-400' : 'text-blue-600 hover:text-blue-800'}`}
+                              title={isDislandi ? "Tekrar Hesaba Kat" : "Bu Ürünü Zarar Hesabından Çıkar"}
+                            >
+                              {isDislandi ? <ToggleLeft size={24} /> : <ToggleRight size={24} />}
+                            </button>
+                          </td>
+                          <td className={`px-4 py-3 font-medium ${isDislandi ? 'text-slate-500 line-through' : 'text-slate-800'}`}>
+                            {item.faturaUrunAdi}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600 whitespace-nowrap">{item.faturaMiktar} {item.faturaBirim}</td>
+                          <td className="px-4 py-3 min-w-[250px]">
+                            <select
+                              disabled={isDislandi}
+                              className={`w-full text-xs border rounded p-2 outline-none focus:ring-1 ${item.durum === 'eslesme_yok' || item.durum === 'supheli_eslesme'
+                                ? 'border-orange-300 bg-orange-50 text-orange-800 focus:ring-orange-500'
+                                : 'border-slate-200 bg-transparent text-slate-700 focus:ring-slate-500'
+                                } ${isDislandi ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              value={item.eslesenTeklifUrunAdi || ""}
+                              onChange={(e) => handleManuelSecim(idx, e.target.value)}
+                            >
+                              <option value="" disabled>Doğru Ürünü Seçin (Eşleşme Yok)...</option>
+                              {item.adaylar.map(aday => (
+                                <option key={aday.teklifUrunAdi} value={aday.teklifUrunAdi}>
+                                  {aday.teklifUrunAdi} ({formatCurrency(aday.teklifFiyat)}) - %{aday.skor} Benzerlik
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-4 py-3 text-right text-slate-600">{formatCurrency(item.teklifFiyat)}</td>
+                          <td className={`px-4 py-3 text-right font-medium ${isDislandi ? 'text-slate-500' : 'text-slate-800'}`}>
+                            {formatCurrency(item.faturaBirimFiyat)}
+                          </td>
+                          <td className={`px-4 py-3 text-right font-bold whitespace-nowrap ${farkRenkClass}`}>
+                            {displayFarkTl > 0 ? "+" : ""}{displayFarkTl === 0 ? "-" : formatCurrency(displayFarkTl)}
+                            {displayFarkYuzde !== 0 && <span className="block text-[10px] opacity-75">{formatPercent(displayFarkYuzde)}</span>}
+                          </td>
+                          <td className="px-4 py-3 flex justify-center">
+                            {renderDurumBadge(item.durum)}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
